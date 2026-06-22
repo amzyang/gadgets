@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# kitty-claude-teams — run Claude Code's Agent Teams "split pane" mode inside kitty.
+#
+# Claude Code only supports tmux/iTerm2 for split-pane teammates. This wrapper
+# fakes a tmux environment (a `tmux` shim on PATH + $TMUX/$TMUX_PANE) so Claude
+# believes it is in tmux, then the shim retargets every tmux command at kitty's
+# remote-control API. Teammates spawn as native kitty splits.
+#
+#   Usage:  kitty-claude-teams [extra claude args...]
+#
+#   Env:
+#     KCT_KITTY_TO   kitty socket to control (e.g. unix:/tmp/mykitty). Defaults to
+#                    $KITTY_LISTEN_ON, which kitty exports automatically when
+#                    `allow_remote_control` + `listen_on` are configured.
+#     KCT_DEBUG=1    trace shim translations to stderr.
+
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SHIM_SRC="$SELF/tmux-shim.sh"
+
+# --- preflight -----------------------------------------------------------------
+if [ -z "${KITTY_WINDOW_ID:-}" ]; then
+  echo "kitty-claude-teams: not running inside kitty (KITTY_WINDOW_ID unset)." >&2
+  echo "  Launch this from a kitty window." >&2
+  exit 1
+fi
+command -v claude >/dev/null 2>&1 || { echo "kitty-claude-teams: 'claude' not found on PATH." >&2; exit 1; }
+
+if command -v kitten >/dev/null 2>&1; then KITTEN=(kitten @); else KITTEN=(kitty +kitten @); fi
+: "${KCT_KITTY_TO:=${KITTY_LISTEN_ON:-}}"
+[ -n "$KCT_KITTY_TO" ] && KITTEN+=(--to "$KCT_KITTY_TO")
+if ! "${KITTEN[@]}" ls >/dev/null 2>&1; then
+  echo "kitty-claude-teams: kitty remote control is not reachable." >&2
+  echo "  Add 'allow_remote_control yes' (and ideally 'listen_on unix:/tmp/mykitty')" >&2
+  echo "  to kitty.conf, or start kitty with -o allow_remote_control=yes." >&2
+  exit 1
+fi
+
+# --- runtime state -------------------------------------------------------------
+SESSION="${KITTY_WINDOW_ID}-$$"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/kitty-claude-teams/$SESSION"
+BIN_DIR="$STATE_DIR/bin"
+mkdir -p "$BIN_DIR"
+ln -sf "$SHIM_SRC" "$BIN_DIR/tmux"            # the fake tmux Claude will find first
+printf '%%0 %s\n' "$KITTY_WINDOW_ID" > "$STATE_DIR/map"   # lead pane %0 = this window
+echo 0 > "$STATE_DIR/counter"
+
+cleanup() { rm -rf "$STATE_DIR"; }
+trap cleanup EXIT
+
+# --- fake-tmux environment -----------------------------------------------------
+export KCT_STATE_DIR="$STATE_DIR"
+export PATH="$BIN_DIR:$PATH"
+export TMUX="$STATE_DIR/fake-tmux-socket,0,0"
+export TMUX_PANE="%0"
+export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+[ -n "$KCT_KITTY_TO" ] && export KCT_KITTY_TO
+
+# Default to --teammate-mode auto (as cmux does) unless the caller set their own.
+have_mode=0
+for a in "$@"; do case "$a" in --teammate-mode|--teammate-mode=*) have_mode=1 ;; esac; done
+extra=()
+[ "$have_mode" = 0 ] && extra=(--teammate-mode auto)
+
+exec claude "${extra[@]}" "$@"
