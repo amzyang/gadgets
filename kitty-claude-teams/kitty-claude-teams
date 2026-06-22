@@ -6,9 +6,12 @@
 # believes it is in tmux, then the shim retargets every tmux command at kitty's
 # remote-control API. Teammates spawn as native kitty splits.
 #
-#   Usage:  kitty-claude-teams [extra claude args...]
+#   Usage:  kitty-claude-teams [--layout split|tab|os-window] [--tabs] [claude args...]
 #
 #   Env:
+#     KCT_LAYOUT     where teammates spawn: split (default) | tab | os-window.
+#                    Same as --layout; `tab` avoids carving up the current pane
+#                    (anthropics/claude-code#23615).
 #     KCT_KITTY_TO   kitty socket to control (e.g. unix:/tmp/mykitty). Defaults to
 #                    $KITTY_LISTEN_ON, which kitty exports automatically when
 #                    `allow_remote_control` + `listen_on` are configured.
@@ -18,6 +21,20 @@ set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHIM_SRC="$SELF/tmux-shim.sh"
+
+# --- parse our own flags (the rest go to claude) -------------------------------
+# --layout split|tab|os-window  where teammates spawn (default split). Convenience
+# for the KCT_LAYOUT env var; addresses anthropics/claude-code#23615.
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --layout)   KCT_LAYOUT="$2"; shift 2 ;;
+    --layout=*) KCT_LAYOUT="${1#*=}"; shift ;;
+    --tabs)     KCT_LAYOUT="tab"; shift ;;
+    *)          args+=("$1"); shift ;;
+  esac
+done
+set -- "${args[@]}"
 
 # --- preflight -----------------------------------------------------------------
 if [ -z "${KITTY_WINDOW_ID:-}" ]; then
@@ -56,6 +73,7 @@ export TMUX="$STATE_DIR/fake-tmux-socket,0,0"
 export TMUX_PANE="%0"
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 [ -n "$KCT_KITTY_TO" ] && export KCT_KITTY_TO
+[ -n "${KCT_LAYOUT:-}" ] && export KCT_LAYOUT
 
 # Default to --teammate-mode auto (as cmux does) unless the caller set their own.
 have_mode=0

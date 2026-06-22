@@ -54,7 +54,7 @@ shell-out 调用真正的 `tmux`（`split-window` / `send-keys` / `select-pane` 
 在一个 kitty 窗口里：
 
 ```bash
-/path/to/kitty-claude-teams [额外的 claude 参数...]
+/path/to/kitty-claude-teams [--layout split|tab|os-window] [--tabs] [额外的 claude 参数...]
 ```
 
 它会：
@@ -74,8 +74,24 @@ ln -s "$(pwd)/kitty-claude-teams/kitty-claude-teams" ~/.local/bin/kitty-claude-t
 
 | 变量 | 作用 |
 | --- | --- |
+| `KCT_LAYOUT` | teammate 落在哪里：`split`（默认，分屏）/ `tab`（新 tab）/ `os-window`（新 OS 窗口）。等价于 `--layout`/`--tabs` |
 | `KCT_KITTY_TO` | 要控制的 kitty socket，如 `unix:/tmp/mykitty`。默认取 kitty 自动导出的 `$KITTY_LISTEN_ON` |
 | `KCT_DEBUG=1` | 把每条 shim 翻译打到 stderr，便于调试 |
+
+### teammate 放在 tab 还是分屏
+
+默认 `split-window` 翻译成 kitty 同 tab 内的分屏，会改变当前 tab 的布局——这正是
+upstream [anthropics/claude-code#23615](https://github.com/anthropics/claude-code/issues/23615)
+抱怨的点（spawn 进新 window 而不是切当前 pane）。用 `--tabs` / `KCT_LAYOUT=tab` 让每个
+teammate 开在**独立 tab**，互不挤占布局；`os-window` 则每个开一个新 OS 窗口。
+
+```bash
+kitty-claude-teams --tabs          # teammate 各占一个 tab
+KCT_LAYOUT=os-window kitty-claude-teams
+```
+
+该设置会随 env 注入到 teammate 窗口，嵌套 spawn 的子 teammate 也沿用同一布局。
+`new-window` 命令始终开新 tab，不受影响。
 
 ## 局限 / 说明
 

@@ -91,7 +91,17 @@ case "$CMD" in
 # ---- create a teammate pane --------------------------------------------------
 split-window|splitw|new-window|neww)
   horiz=0; nofocus=0; printid=0; fmt=""; cwd="current"; target=""; shellcmd=(); injenv=()
-  case "$CMD" in new-window|neww) wintype="tab" ;; *) wintype="window" ;; esac
+  # new-window/neww is always a tab. For split-window, KCT_LAYOUT decides where the
+  # teammate lands (addresses anthropics/claude-code#23615: don't always split the
+  # current pane). split=kitty split (default) | tab=new tab | os-window=new OS window.
+  case "$CMD" in
+    new-window|neww) wintype="tab" ;;
+    *) case "${KCT_LAYOUT:-split}" in
+         tab)           wintype="tab" ;;
+         os-window|os)  wintype="os-window" ;;
+         *)             wintype="window" ;;
+       esac ;;
+  esac
   while [ $# -gt 0 ]; do
     case "$1" in
       -h) horiz=1; shift ;;                    # tmux -h = left/right
@@ -110,8 +120,12 @@ split-window|splitw|new-window|neww)
     esac
   done
 
-  loc="hsplit"; [ "$horiz" = 1 ] && loc="vsplit"
-  args=(launch --type="$wintype" --location="$loc" --cwd="$cwd")
+  args=(launch --type="$wintype" --cwd="$cwd")
+  # --location only applies to in-tab splits; kitty ignores it for tab/os-window.
+  if [ "$wintype" = "window" ]; then
+    loc="hsplit"; [ "$horiz" = 1 ] && loc="vsplit"
+    args+=(--location="$loc")
+  fi
   [ "$nofocus" = 1 ] && args+=(--keep-focus)
 
   pane="$(new_pane_id)"
@@ -123,12 +137,13 @@ split-window|splitw|new-window|neww)
   args+=(--env "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
   args+=(--env "KCT_STATE_DIR=$STATE_DIR")
   [ -n "${KCT_KITTY_TO:-}" ] && args+=(--env "KCT_KITTY_TO=$KCT_KITTY_TO")
+  [ -n "${KCT_LAYOUT:-}" ] && args+=(--env "KCT_LAYOUT=$KCT_LAYOUT")
   for e in "${injenv[@]:-}"; do [ -n "$e" ] && args+=(--env "$e"); done
   [ ${#shellcmd[@]} -gt 0 ] && args+=(-- "${shellcmd[@]}")
 
   kid="$(kc "${args[@]}")" || { log "launch failed"; exit 1; }
   map_put "$pane" "$kid"
-  log "created pane=$pane kitty=$kid loc=$loc"
+  log "created pane=$pane kitty=$kid type=$wintype"
 
   [ "$printid" = 1 ] && fmt_pane "$fmt" "$pane"
   ;;
