@@ -34,7 +34,8 @@ while [ $# -gt 0 ]; do
     *)          args+=("$1"); shift ;;
   esac
 done
-set -- "${args[@]}"
+# ${arr[@]+...} keeps `set -u` happy with an empty array on bash <4.4 (macOS 3.2).
+set -- ${args[@]+"${args[@]}"}
 
 # --- preflight -----------------------------------------------------------------
 if [ -z "${KITTY_WINDOW_ID:-}" ]; then
@@ -81,4 +82,6 @@ for a in "$@"; do case "$a" in --teammate-mode|--teammate-mode=*) have_mode=1 ;;
 extra=()
 [ "$have_mode" = 0 ] && extra=(--teammate-mode auto)
 
-exec claude "${extra[@]}" "$@"
+# Run claude as a child (not exec) so the EXIT trap fires and STATE_DIR is
+# cleaned up instead of leaking. set -e propagates claude's exit status.
+claude ${extra[@]+"${extra[@]}"} "$@"

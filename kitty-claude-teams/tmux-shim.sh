@@ -42,15 +42,37 @@ fi
 kc() { "${KITTEN[@]}" "$@"; }
 
 # ---- pane-id <-> kitty-window-id map -----------------------------------------
+# Map/counter mutations are serialized with an atomic mkdir lock so parallel
+# teammate spawns can't lose entries or hand out duplicate pane ids. mkdir is
+# used (not flock) because macOS has no flock(1). Reads stay lock-free: every
+# writer swaps the file in with an atomic rename, so a reader always sees a
+# complete old-or-new file, never a partial one.
+LOCK_DIR="$STATE_DIR/.lock"
+_lock()   { local n=0; until mkdir "$LOCK_DIR" 2>/dev/null; do sleep 0.02; n=$((n+1)); [ "$n" -gt 500 ] && break; done; }
+_unlock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
+
 map_get() { awk -v k="$1" '$1==k{print $2; exit}' "$MAP"; }
 map_put() { # <tmux-pane-id> <kitty-window-id>
-  local k="$1" v="$2" tmp="$MAP.tmp"
+  local k="$1" v="$2" tmp="$MAP.$$.tmp"
+  _lock
   awk -v k="$k" -v v="$v" '
     $1==k{print k" "v; done=1; next} {print}
     END{if(!done) print k" "v}' "$MAP" > "$tmp" && mv "$tmp" "$MAP"
+  _unlock
 }
-map_del() { local k="$1" tmp="$MAP.tmp"; awk -v k="$k" '$1!=k' "$MAP" > "$tmp" && mv "$tmp" "$MAP"; }
-new_pane_id() { local n; n=$(( $(cat "$COUNTER") + 1 )); echo "$n" > "$COUNTER"; printf '%%%s' "$n"; }
+map_del() {
+  local k="$1" tmp="$MAP.$$.tmp"
+  _lock
+  awk -v k="$k" '$1!=k' "$MAP" > "$tmp" && mv "$tmp" "$MAP"
+  _unlock
+}
+new_pane_id() { # allocate atomically so concurrent spawns never collide
+  local n
+  _lock
+  n=$(( $(cat "$COUNTER") + 1 )); echo "$n" > "$COUNTER"
+  _unlock
+  printf '%%%s' "$n"
+}
 
 # Expand the tmux format placeholders Claude uses for pane ids. (Quoted patterns
 # force literal matching; an unquoted '#{pane_id}' default would close the ${...}.)
@@ -165,7 +187,7 @@ send-keys|send)
   done
   kid="$(resolve_kid "$target")"; [ -z "$kid" ] && exit 0
   text=""
-  for k in "${keys[@]:-}"; do
+  for k in ${keys[@]+"${keys[@]}"}; do
     if [ "$literal" = 1 ]; then text+="$k"; continue; fi
     case "$k" in
       Enter|C-m|KPEnter) text+=$'\n' ;;
@@ -179,7 +201,10 @@ send-keys|send)
       *)                 text+="$k" ;;
     esac
   done
-  # We build real control bytes above, so send-text sees them verbatim.
+  # kitty send-text applies Python escaping to its argument (\t -> TAB, \x1b ->
+  # ESC, \\ -> \), so a literal backslash in Claude's text would be mangled.
+  # Double every backslash; the real control bytes built above contain none.
+  text="${text//\\/\\\\}"
   kc send-text --match "id:$kid" -- "$text" >/dev/null 2>&1 || true
   ;;
 
