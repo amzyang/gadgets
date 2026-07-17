@@ -103,7 +103,7 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		if err := p.tick(ctx, nowEpoch, self); err != nil {
 			fails++
 			if IsAuthError(err) {
-				p.emit(NewAlert("auth", "user token 失效，请运行 lark-cli auth login 后重启监控"))
+				p.emit(NewAlert("auth", authAlertMsg(err)))
 				return err
 			}
 			wait := int64(60) << (fails - 1)

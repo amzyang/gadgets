@@ -70,7 +70,7 @@ func RunCatchup(s *Store, cli LarkCLI, paths Paths, since string, peek int) erro
 			searchMaxPages, searchPageSize, searchMaxPages*searchPageSize)
 	}
 
-	rules := LoadRulesDir(self, paths.ConfigDir)
+	rules := LoadRulesDir(self.OpenID, paths.ConfigDir)
 	cursorMinutes := make(map[string]string, len(cursors))
 	for cid, at := range cursors {
 		cursorMinutes[cid] = FmtMinute(at)
@@ -151,16 +151,20 @@ func RunSendCard(s *Store, cli LarkCLI, mid, draftPath, original, from, scene, t
 	if err := s.PendingPut(mid, draft, card, time.Now().Unix()); err != nil {
 		return err
 	}
-	if err := cli.SendCardToUser(self, card); err != nil {
+	if err := cli.SendCardToUser(self.OpenID, card); err != nil {
 		return fmt.Errorf("send card failed: %w", err)
 	}
 	logf("draft card sent for %s", mid)
 	return nil
 }
 
-// RunStatus 输出健康 JSON。
-func RunStatus(s *Store) error {
-	now := time.Now().Unix()
+// RunStatus 输出健康 JSON（含 auth 状态，心跳检查只看这一份输出）。
+func RunStatus(s *Store, cli LarkCLI) error {
+	os.Stdout.Write(EncodeLine(buildStatus(s, cli, time.Now())))
+	return nil
+}
+
+func buildStatus(s *Store, cli LarkCLI, now time.Time) Status {
 	heartbeat, _ := s.MetaGetInt("heartbeat")
 	cursor, _ := s.MetaGetInt("cursor")
 	lastFlush, _ := s.MetaGetInt("last_flush")
@@ -168,10 +172,20 @@ func RunStatus(s *Store) error {
 	if consumer == "" {
 		consumer = "unknown"
 	}
-	os.Stdout.Write(EncodeLine(Status{
-		Cursor: cursor, Heartbeat: heartbeat, HeartbeatAge: now - heartbeat,
+	st := Status{
+		Cursor: cursor, Heartbeat: heartbeat, HeartbeatAge: now.Unix() - heartbeat,
 		ConsumerState: consumer, Pending: s.PendingCount(),
 		DigestBuffered: s.DigestCount(), LastFlush: lastFlush,
-	}))
-	return nil
+	}
+	auth, err := cli.AuthSelf()
+	if err != nil {
+		st.AuthWarning = authAlertMsg(err)
+		return st
+	}
+	st.AuthOK = true
+	if !auth.RefreshExpiresAt.IsZero() {
+		st.AuthRefreshExpiresIn = int64(auth.RefreshExpiresAt.Sub(now).Seconds())
+	}
+	st.AuthWarning = authExpiringMsg(auth.RefreshExpiresAt, now)
+	return st
 }

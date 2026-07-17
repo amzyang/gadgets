@@ -21,11 +21,11 @@ Go 单二进制（`bin/lark-watch`）：一个进程同时承载**消息轮询**
 
 ## 启动（零交互）
 
-用户表达监控意图后立即启动，不要反问监控范围（默认全量三层分级）：
+用户表达监控意图后立即启动，不要反问监控范围（默认全量三层分级）。
+auth 自检已内置：二进制启动即校验（lark-cli 是否可用、user 身份、token 刷新期），
+异常会立即输出 alert（见「alert / Monitor 退出」），按 msg 转告即可，无需预检：
 
-1. 预检（一次）：`lark-cli auth status` 确认 `identities.user.available == true`。
-   不可用则引导 `lark-cli auth login`，其余情况不询问直接继续。
-2. 启动**唯一的** Monitor（轮询与卡片回调都在里面，禁止拆分）：
+1. 启动**唯一的** Monitor（轮询与卡片回调都在里面，禁止拆分）：
 
    ```
    Monitor({
@@ -38,7 +38,7 @@ Go 单二进制（`bin/lark-watch`）：一个进程同时承载**消息轮询**
    可选 flag：`--interval 45`（轮询秒数）、`--digest-window 600`、`--digest-max 20`。
    **不要传 `timeout_ms`**：超时到点会静默杀死监控进程（曾发生：1h 超时把整个
    监控带走且无人发现）。Monitor 参数就按模板三项，不增不减。
-3. 挂兜底心跳（三个参数缺一不可，缺 `prompt` 会直接报错）：
+2. 挂兜底心跳（三个参数缺一不可，缺 `prompt` 会直接报错）：
 
    ```
    ScheduleWakeup({
@@ -128,7 +128,10 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 
 ### alert / Monitor 退出
 
-- `kind:"auth"`：user token 失效。转告用户运行 `lark-cli auth login`，完成后重启 Monitor。
+- `kind:"auth"`：user 身份不可用（未登录 / token 失效 / lark-cli 未安装），
+  msg 已含行动指引，原样转告用户，完成后重启 Monitor。
+- `kind:"auth-expiring"`：token 刷新期 < 24h，按 msg 转告提醒重新
+  `lark-cli auth login`；Monitor 继续运行，无需重启。
 - `kind:"api"`：连续调用失败（仍在退避重试），转告即可。
 - `kind:"card-daemon"`：卡片回调监听连续快速失败（自动重启中，仅卡片按钮降级，
   轮询不受影响），转告即可。
@@ -138,12 +141,13 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 ### 心跳唤醒（ScheduleWakeup 触发）
 
 第一步永远是**重挂心跳**：以相同 prompt 再 ScheduleWakeup 1800s（三参数同首挂，
-见「启动」第 3 步）。先挂再检查——noop 分支忘记重挂会让心跳链就此断掉（曾发生）。
+见「启动」第 2 步）。先挂再检查——noop 分支忘记重挂会让心跳链就此断掉（曾发生）。
 然后跑 `{SKILL_DIR}/bin/lark-watch status` 健康检查：`heartbeat_age_secs` <
 3×interval（默认 135）、`consumer_state == "alive"`、守护进程还活着
 （`pgrep -f 'bin/lark-watch run'`；TaskList 列的是 to-do 任务、查不到 Monitor，
-不要用它验活）。另外 `lark-cli auth status` 的 `refreshExpiresAt`
-距今 < 24h 时提前提醒用户重新登录。
+不要用它验活）。auth 状态已并入 status 输出（`auth_ok` /
+`auth_refresh_expires_in_secs` / `auth_warning`）：`auth_warning` 非空时
+原样转告用户，不要另跑 `lark-cli auth status`。
 
 ## 展示规范
 

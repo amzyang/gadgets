@@ -19,7 +19,7 @@ type fakeCLI struct {
 func (f *fakeCLI) record(format string, args ...any) {
 	f.calls = append(f.calls, fmt.Sprintf(format, args...))
 }
-func (f *fakeCLI) AuthSelf() (string, error) { return "ou_SELF", nil }
+func (f *fakeCLI) AuthSelf() (AuthInfo, error) { return AuthInfo{OpenID: "ou_SELF"}, nil }
 func (f *fakeCLI) Search(start, end string) ([]byte, error) {
 	f.record("search %s %s", start, end)
 	return []byte(emptyMessagesResp), nil

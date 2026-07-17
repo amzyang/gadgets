@@ -8,12 +8,13 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // LarkCLI 是对 lark-cli 二进制的唯一边界（鉴权/token 刷新/渲染全部委托给它）。
 // 测试注入 fake 实现。
 type LarkCLI interface {
-	AuthSelf() (string, error)
+	AuthSelf() (AuthInfo, error)
 	Search(start, end string) ([]byte, error)
 	ChatList() ([]ChatMeta, error)
 	ChatMessages(cid, start string) ([]byte, error)
@@ -42,6 +43,8 @@ type ExecError struct {
 func (e *ExecError) Error() string {
 	return fmt.Sprintf("lark-cli %s: %v: %s", strings.Join(e.Args, " "), e.Err, e.Stderr)
 }
+
+func (e *ExecError) Unwrap() error { return e.Err }
 
 // IsAuthError 识别 user token 失效类错误（对齐 bash 版的 stderr 匹配）。
 func IsAuthError(err error) bool {
@@ -89,25 +92,39 @@ func (c *ExecLarkCLI) run(args ...string) ([]byte, error) {
 	return out, nil
 }
 
-func (c *ExecLarkCLI) AuthSelf() (string, error) {
+// AuthInfo 是 `auth status` 里 daemon 关心的子集。
+type AuthInfo struct {
+	OpenID           string
+	RefreshExpiresAt time.Time // 刷新期截止；零值 = CLI 未提供
+}
+
+func (c *ExecLarkCLI) AuthSelf() (AuthInfo, error) {
 	out, err := c.run("auth", "status")
 	if err != nil {
-		return "", err
+		return AuthInfo{}, err
 	}
+	return parseAuthStatus(out)
+}
+
+// parseAuthStatus 校验 user 身份可用并提取 AuthInfo。
+func parseAuthStatus(out []byte) (AuthInfo, error) {
 	var st struct {
 		Identities struct {
 			User struct {
-				OpenID string `json:"openId"`
+				Available        bool      `json:"available"`
+				OpenID           string    `json:"openId"`
+				RefreshExpiresAt time.Time `json:"refreshExpiresAt"`
 			} `json:"user"`
 		} `json:"identities"`
 	}
 	if err := json.Unmarshal(out, &st); err != nil {
-		return "", err
+		return AuthInfo{}, err
 	}
-	if st.Identities.User.OpenID == "" {
-		return "", fmt.Errorf("auth status: user openId empty, run `lark-cli auth login`")
+	u := st.Identities.User
+	if !u.Available || u.OpenID == "" {
+		return AuthInfo{}, fmt.Errorf("auth status: user identity unavailable, run `lark-cli auth login --domain im,contact`")
 	}
-	return st.Identities.User.OpenID, nil
+	return AuthInfo{OpenID: u.OpenID, RefreshExpiresAt: u.RefreshExpiresAt}, nil
 }
 
 func (c *ExecLarkCLI) Search(start, end string) ([]byte, error) {

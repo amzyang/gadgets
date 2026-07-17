@@ -3,7 +3,10 @@ package watch
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"sync"
 	"syscall"
 	"time"
@@ -20,16 +23,41 @@ func (w *lineWriter) Write(line []byte) {
 	os.Stdout.Write(line)
 }
 
+// authAlertMsg 把 auth 类错误（AuthSelf 失败、轮询鉴权失效）翻成给用户的
+// 行动指引（alert msg 即全部信息，模型只需转述）。
+func authAlertMsg(err error) string {
+	if errors.Is(err, exec.ErrNotFound) {
+		return "lark-cli 未安装或不在 PATH：npm i -g @larksuite/cli 后重启 Monitor"
+	}
+	return "user 身份不可用：请运行 lark-cli auth login --domain im,contact，完成后重启 Monitor"
+}
+
+// authExpiringMsg 在 user token 刷新期不足 24h 时返回提醒文案；零值视为未知不告警。
+func authExpiringMsg(refreshExpiresAt, now time.Time) string {
+	if refreshExpiresAt.IsZero() || refreshExpiresAt.Sub(now) >= 24*time.Hour {
+		return ""
+	}
+	hours := int(refreshExpiresAt.Sub(now).Hours())
+	if hours < 0 {
+		hours = 0
+	}
+	return fmt.Sprintf("user token 刷新期仅剩约 %d 小时，请尽快 lark-cli auth login（Monitor 继续运行）", hours)
+}
+
 // RunDaemon 是 run/poll 子命令：poller goroutine，withCards 时外加卡片 consume
 // 子进程监督 goroutine。稳态卡片链路零 stdout（零模型唤醒）；仅 poller 事件与
 // 异常 alert 走 stdout。
 func RunDaemon(ctx context.Context, s *Store, cli LarkCLI, paths Paths, interval time.Duration, digestWindow int64, digestMax int, withCards bool) error {
 	w := &lineWriter{}
-	self, err := cli.AuthSelf()
+	auth, err := cli.AuthSelf()
 	if err != nil {
-		w.Write(EncodeLine(NewAlert("auth", "无法获取用户身份 open_id，请先 lark-cli auth login")))
+		w.Write(EncodeLine(NewAlert("auth", authAlertMsg(err))))
 		return err
 	}
+	if msg := authExpiringMsg(auth.RefreshExpiresAt, time.Now()); msg != "" {
+		w.Write(EncodeLine(NewAlert("auth-expiring", msg)))
+	}
+	self := auth.OpenID
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

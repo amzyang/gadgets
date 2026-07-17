@@ -70,11 +70,11 @@ func dispatch(cmd string, args []string) error {
 			return err
 		}
 		defer s.Close()
-		self, err := cli.AuthSelf()
+		auth, err := cli.AuthSelf()
 		if err != nil {
 			return err
 		}
-		watch.SuperviseCardConsumerStandalone(daemonCtx(), s, cli, self)
+		watch.SuperviseCardConsumerStandalone(daemonCtx(), s, cli, auth.OpenID)
 		return nil
 
 	case "catchup":
@@ -146,7 +146,7 @@ func dispatch(cmd string, args []string) error {
 			return err
 		}
 		defer s.Close()
-		return watch.RunStatus(s)
+		return watch.RunStatus(s, cli)
 
 	default:
 		usage()
