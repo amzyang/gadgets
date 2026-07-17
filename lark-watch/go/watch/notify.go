@@ -39,13 +39,105 @@ func ringBell(ctx context.Context) {
 	exec.CommandContext(ctx, "osascript", "-e", "beep").Run()
 }
 
+// larkBundleMarkers 识别飞书系客户端的 bundle id 子串：
+// electron.lark（飞书标准版）、larksuite（Lark 国际版）、
+// dancesuite（字节 KA 定制版前缀，如高途 Lingxi）。
+var larkBundleMarkers = []string{"electron.lark", "larksuite", "dancesuite"}
+
+// suppressIdleMaxSecs：HIDIdleTime 超过该值视为人已离开（锁屏/走开），照常通知。
+const suppressIdleMaxSecs = 120
+
+// frontmostBundleID / hidIdleSecs 是系统探测入口，可注入测试替身（IO 边缘）。
+var (
+	frontmostBundleID = lsappinfoFrontBundleID
+	hidIdleSecs       = ioregHIDIdleSecs
+)
+
+// shouldSuppressNotify：飞书处于前台且用户在机器前活跃时跳过系统提示——
+// 消息本人已看到，弹窗纯属打扰。任一探测失败即 false（fail-open，
+// 宁可多打扰不可漏消息）；锁屏/走开时 frontmost 仍是锁屏前的 app，
+// 靠 idle 阈值兜住，照常通知。
+func shouldSuppressNotify(ctx context.Context) bool {
+	bid := frontmostBundleID(ctx)
+	if bid == "" || !isLarkBundleID(bid) {
+		return false
+	}
+	idle := hidIdleSecs(ctx)
+	return idle >= 0 && idle < suppressIdleMaxSecs
+}
+
+func isLarkBundleID(bid string) bool {
+	for _, m := range larkBundleMarkers {
+		if strings.Contains(bid, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// lsappinfoFrontBundleID 取 frontmost 应用的 bundle id
+// （lsappinfo 无需 Automation 授权，daemon 场景可用）；探测失败返回 ""。
+func lsappinfoFrontBundleID(ctx context.Context) string {
+	out, err := exec.CommandContext(ctx, "sh", "-c",
+		`lsappinfo info -only bundleid "$(lsappinfo front)"`).Output()
+	if err != nil {
+		return ""
+	}
+	return parseBundleID(string(out))
+}
+
+// parseBundleID 从 `"CFBundleIdentifier"="com.foo.bar"` 中取值；解析不到返回 ""。
+func parseBundleID(s string) string {
+	_, rest, ok := strings.Cut(s, `"CFBundleIdentifier"="`)
+	if !ok {
+		return ""
+	}
+	id, _, ok := strings.Cut(rest, `"`)
+	if !ok {
+		return ""
+	}
+	return id
+}
+
+// ioregHIDIdleSecs 取用户输入空闲秒数（HIDIdleTime，纳秒）；探测失败返回 -1。
+func ioregHIDIdleSecs(ctx context.Context) float64 {
+	out, err := exec.CommandContext(ctx, "ioreg", "-c", "IOHIDSystem").Output()
+	if err != nil {
+		return -1
+	}
+	return parseHIDIdleSecs(string(out))
+}
+
+// parseHIDIdleSecs 从 ioreg 输出扫首个 `"HIDIdleTime" = N`（纳秒转秒）；
+// 解析不到返回 -1。
+func parseHIDIdleSecs(s string) float64 {
+	_, rest, ok := strings.Cut(s, `"HIDIdleTime" = `)
+	if !ok {
+		return -1
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return -1
+	}
+	ns, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return -1
+	}
+	return ns / 1e9
+}
+
 // RunNotify 经 sh -c 执行通知脚本，聚合整个 P0 批次为一次调用；执行前先响铃。
+// 飞书前台且用户活跃时整体跳过（见 shouldSuppressNotify）。
 // 环境变量：LW_TITLE 标题（多条带条数）、LW_MESSAGE/LW_SUMMARY 每条一行的聚合
 // 摘要、LW_LINK 首条 applink（点击跳转）、LW_COUNT 条数、LW_FROM/LW_CHAT/
 // LW_CTYPE/LW_TYPE/LW_TEXT 取首条。
 // 同步阻塞至命令退出——弹窗类命令会等用户点击，调用方需自行 go；
 // ctx 取消时子进程被终止。
 func RunNotify(ctx context.Context, script string, batch []Message) {
+	if shouldSuppressNotify(ctx) {
+		logf("notify suppressed: Lark frontmost and user active")
+		return
+	}
 	first := batch[0]
 	lines := make([]string, 0, len(batch))
 	for _, m := range batch {

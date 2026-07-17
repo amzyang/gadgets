@@ -217,6 +217,9 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
   响铃已内置于二进制（通知前自动响：终端 bell 优先，无 tty 回退 osascript
   beep，SSH 会话静默），脚本里不必再加 bell。
 
+  飞书客户端处于前台且用户活跃（输入空闲 < 2 分钟）时自动跳过响铃与通知
+  （人已在看飞书，无需再弹；锁屏/走开或探测失败时照常通知），无需配置。
+
   要横幅不打断操作可换 `display notification (item 1 of argv) with title (item 2
   of argv)`（走通知中心，但横幅点击带不了跳转）。注意用 argv 传参，勿把 `$LW_*`
   拼进 AppleScript 源码（正文含引号会破坏脚本甚至被注入）。

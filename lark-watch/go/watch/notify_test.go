@@ -32,8 +32,81 @@ func stubBell(t *testing.T) *int {
 	return &called
 }
 
+// stubProbes 注入 frontmost / idle 探测替身（系统探测是 IO 边缘，测试不真探）。
+func stubProbes(t *testing.T, bundleID string, idleSecs float64) {
+	t.Helper()
+	oldF, oldI := frontmostBundleID, hidIdleSecs
+	frontmostBundleID = func(context.Context) string { return bundleID }
+	hidIdleSecs = func(context.Context) float64 { return idleSecs }
+	t.Cleanup(func() { frontmostBundleID, hidIdleSecs = oldF, oldI })
+}
+
+func TestShouldSuppressNotify(t *testing.T) {
+	cases := []struct {
+		name     string
+		bundleID string
+		idleSecs float64
+		want     bool
+	}{
+		{"飞书标准版前台且活跃", "com.electron.lark", 3, true},
+		{"Lark 国际版前台且活跃", "com.larksuite.larkApp", 3, true},
+		{"KA 定制版（Lingxi）前台且活跃", "com.dancesuite.dance.ka.sagtjy516.mac", 3, true},
+		{"飞书前台但人已走开", "com.electron.lark", 300, false},
+		{"其他 app 前台", "net.kovidgoyal.kitty", 3, false},
+		{"frontmost 探测失败", "", 3, false},
+		{"idle 探测失败", "com.electron.lark", -1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stubProbes(t, c.bundleID, c.idleSecs)
+			if got := shouldSuppressNotify(context.Background()); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestRunNotifySuppressed(t *testing.T) {
+	rang := stubBell(t)
+	stubProbes(t, "com.electron.lark", 3)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+
+	RunNotify(context.Background(), `touch "$LW_TEST_OUT"`, []Message{
+		{From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗"},
+	})
+
+	if _, err := os.Stat(out); err == nil {
+		t.Error("notify script ran, want suppressed")
+	}
+	if *rang != 0 {
+		t.Errorf("bell rang %d times, want 0", *rang)
+	}
+}
+
+func TestParseBundleID(t *testing.T) {
+	got := parseBundleID("\"CFBundleIdentifier\"=\"net.kovidgoyal.kitty\"\n")
+	if got != "net.kovidgoyal.kitty" {
+		t.Errorf("got %q, want %q", got, "net.kovidgoyal.kitty")
+	}
+	if got := parseBundleID("no such key"); got != "" {
+		t.Errorf("garbage input: got %q, want empty", got)
+	}
+}
+
+func TestParseHIDIdleSecs(t *testing.T) {
+	got := parseHIDIdleSecs(`    | | |   "HIDIdleTime" = 462824375` + "\n")
+	if got != 0.462824375 {
+		t.Errorf("got %v, want 0.462824375", got)
+	}
+	if got := parseHIDIdleSecs("no such key"); got != -1 {
+		t.Errorf("garbage input: got %v, want -1", got)
+	}
+}
+
 func TestRunNotify(t *testing.T) {
 	rang := stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
 	out := filepath.Join(t.TempDir(), "out")
 	t.Setenv("LW_TEST_OUT", out)
 	script := `printf '%s|%s|%s|%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_FROM" "$LW_CHAT" "$LW_TYPE" "$LW_TEXT" "$LW_LINK" "$LW_MESSAGE" > "$LW_TEST_OUT"`
