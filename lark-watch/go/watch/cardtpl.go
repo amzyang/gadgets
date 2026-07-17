@@ -109,21 +109,34 @@ func RenderDraftCard(mid, scene, from, t, original, draft string) string {
 	return encodeCompact(c)
 }
 
-// 完成态状态行 markdown（与卡片其余 markup 同层维护）。
-const (
-	statusSent    = "<font color='green'>✅ 已发送</font>"
-	statusIgnored = "已忽略"
-	statusStale   = "⚠️ 草稿已失效，请回终端处理"
-	statusFailed  = "❌ 发送失败，请回终端处理"
+// doneState 是卡片完成态：title 覆盖头部标题（脱离「待确认」），
+// status 是追加到卡片末尾的状态行 markdown（与卡片其余 markup 同层维护）。
+type doneState struct {
+	title  string
+	status string
+}
+
+var (
+	doneSent    = doneState{title: "回复已发送", status: "<font color='green'>✅ 已发送</font>"}
+	doneIgnored = doneState{title: "草稿已忽略", status: "已忽略"}
+	doneStale   = doneState{title: "草稿已失效", status: "⚠️ 草稿已失效，请回终端处理"}
+	doneFailed  = doneState{title: "回复发送失败", status: "❌ 发送失败，请回终端处理"}
 )
 
-// RenderDoneCard 基于卡片原稿生成完成态：去掉全部按钮，末尾追加状态行。
+// RenderDoneCard 基于卡片原稿生成完成态：更新头部标题、去掉全部按钮、末尾追加状态行。
 // 原稿必须是发卡时落盘的本地 JSON——回调返回的 card_content 是服务端 user_dsl
 // 序列化，markdown 换行在往返中会丢失，仅作缺原稿时的兜底。
-func RenderDoneCard(cardJSON, status string) (string, error) {
+func RenderDoneCard(cardJSON string, st doneState) (string, error) {
 	var card map[string]any
 	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
 		return "", err
+	}
+	if st.title != "" {
+		if header, ok := card["header"].(map[string]any); ok {
+			if title, ok := header["title"].(map[string]any); ok {
+				title["content"] = st.title
+			}
+		}
 	}
 	body, ok := card["body"].(map[string]any)
 	if !ok {
@@ -137,7 +150,7 @@ func RenderDoneCard(cardJSON, status string) (string, error) {
 		}
 		kept = append(kept, el)
 	}
-	kept = append(kept, map[string]any{"tag": "markdown", "content": status})
+	kept = append(kept, map[string]any{"tag": "markdown", "content": st.status})
 	body["elements"] = kept
 	return encodeCompact(card), nil
 }

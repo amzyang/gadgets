@@ -48,7 +48,7 @@ func HandleCardEvent(s *Store, cli LarkCLI, self string, raw []byte, now int64) 
 	}
 
 	draft, cardSrc, hasPending := s.PendingGet(act.Mid)
-	updateCard := func(status string) {
+	updateCard := func(st doneState) {
 		src := cardSrc
 		if src == "" {
 			src = ev.CardContent
@@ -57,7 +57,7 @@ func HandleCardEvent(s *Store, cli LarkCLI, self string, raw []byte, now int64) 
 			cardLogf("no card source/token, skip update")
 			return
 		}
-		newCard, err := RenderDoneCard(src, status)
+		newCard, err := RenderDoneCard(src, st)
 		if err != nil {
 			cardLogf("card source parse failed: %v", err)
 			return
@@ -71,25 +71,25 @@ func HandleCardEvent(s *Store, cli LarkCLI, self string, raw []byte, now int64) 
 	case "send":
 		if !hasPending {
 			cardLogf("send: pending missing for %s", act.Mid)
-			updateCard(statusStale)
+			updateCard(doneStale)
 			return
 		}
 		if err := cli.ReplyAsUser(act.Mid, draft); err != nil {
-			updateCard(statusFailed)
+			updateCard(doneFailed)
 			cardLogf("reply failed for %s (pending kept): %v", act.Mid, err)
 			return
 		}
-		updateCard(statusSent)
+		updateCard(doneSent)
 		s.PendingDelete(act.Mid)
 		cardLogf("sent reply for %s", act.Mid)
 	case "ignore":
-		updateCard(statusIgnored)
+		updateCard(doneIgnored)
 		s.PendingDelete(act.Mid)
 		cardLogf("ignored %s", act.Mid)
 	case "copy":
 		if !hasPending {
 			cardLogf("copy: pending missing for %s", act.Mid)
-			updateCard(statusStale)
+			updateCard(doneStale)
 			return
 		}
 		if err := cli.SendTextAsBot(self, draft); err != nil {

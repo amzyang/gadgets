@@ -222,7 +222,7 @@ func TestRenderDraftCardMinimal(t *testing.T) {
 }
 
 func TestRenderDoneCard(t *testing.T) {
-	got, err := RenderDoneCard(testCardContent, "✅ 已发送")
+	got, err := RenderDoneCard(testCardContent, doneSent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,5 +233,24 @@ func TestRenderDoneCard(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q: %s", want, got)
 		}
+	}
+}
+
+// 完成态更新头部标题（脱离「待确认」）：发卡渲染标题，改卡替换为完成态标题。
+func TestRenderDoneCardUpdatesTitle(t *testing.T) {
+	draft := RenderDraftCard("om_title", "私聊", "张三", "12:03", "原始消息", "草稿内容")
+	if !strings.Contains(draft, "回复草稿待确认") {
+		t.Fatalf("draft card should have pending title: %s", draft)
+	}
+
+	got, err := RenderDoneCard(draft, doneSent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "回复草稿待确认") {
+		t.Errorf("done card should not keep pending title: %s", got)
+	}
+	if !strings.Contains(got, doneSent.title) {
+		t.Errorf("done card missing title %q: %s", doneSent.title, got)
 	}
 }
