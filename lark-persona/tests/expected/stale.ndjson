@@ -1,0 +1,5 @@
+{"kind":"style","layer":"up","new":2,"base":4,"stale":true}
+{"kind":"style","layer":"peer","new":1,"base":4,"stale":false}
+{"kind":"style","layer":"group","new":2,"base":6,"stale":false}
+{"kind":"card","fid":"ou_alice","name":"Alice","new":4,"stale":true}
+{"kind":"card-missing","fid":"ou_boss","name":"老板","rank":1}

@@ -1,0 +1,5 @@
+{"fid":"ou_SELF","name":"我","leader":"ou_boss","depts":["od-1"]}
+{"fid":"ou_boss","name":"老板","leader":"ou_big","depts":["od-1"]}
+{"fid":"ou_big","name":"大老板","leader":null,"depts":["od-0"]}
+{"fid":"ou_alice","name":"Alice","leader":"ou_boss","depts":["od-1"]}
+{"fid":"ou_carol","name":"Carol","leader":"ou_SELF","depts":["od-1"]}

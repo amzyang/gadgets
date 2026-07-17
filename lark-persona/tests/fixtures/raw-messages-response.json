@@ -1,0 +1,51 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "has_more": false,
+    "messages": [
+      {
+        "chat_id": "oc_t1",
+        "content": "第二条",
+        "create_time": "2026-07-01 10:05",
+        "deleted": false,
+        "message_id": "om_2",
+        "message_position": "11",
+        "msg_type": "text",
+        "sender": { "id": "ou_b", "id_type": "open_id", "name": "乙", "sender_type": "user", "tenant_key": "tk" }
+      },
+      {
+        "chat_id": "oc_t1",
+        "content": "已撤回的",
+        "create_time": "2026-07-01 10:03",
+        "deleted": true,
+        "message_id": "om_del",
+        "message_position": "10",
+        "msg_type": "text",
+        "sender": { "id": "ou_b", "id_type": "open_id", "name": "乙", "sender_type": "user", "tenant_key": "tk" }
+      },
+      {
+        "chat_id": "oc_t1",
+        "content": "第一条",
+        "create_time": "2026-07-01 10:00",
+        "deleted": false,
+        "message_id": "om_1",
+        "message_position": "9",
+        "msg_type": "text",
+        "sender": { "id": "ou_a", "id_type": "open_id", "name": "甲", "sender_type": "user", "tenant_key": "tk" }
+      },
+      {
+        "chat_id": "oc_t1",
+        "content": "打卡提醒",
+        "create_time": "2026-07-01 10:00",
+        "deleted": false,
+        "message_id": "om_app",
+        "message_position": "8",
+        "msg_type": "text",
+        "sender": { "id": "ou_app", "id_type": "open_id", "name": "考勤机器人", "sender_type": "app", "tenant_key": "tk" }
+      }
+    ],
+    "page_token": "",
+    "total": 4
+  }
+}

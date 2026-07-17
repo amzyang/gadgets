@@ -1,0 +1,7 @@
+{"mid":"m1","cid":"oc_p1","fid":"ou_alice","ftype":"user","from":"Alice","type":"text","t":"2026-07-01 09:00","pos":1,"text":"在吗，帮我看下这个接口报错"}
+{"mid":"m2","cid":"oc_p1","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 09:02","pos":2,"text":"收到"}
+{"mid":"m3","cid":"oc_p1","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 09:30","pos":3,"text":"修好了，是配置问题"}
+{"mid":"m4","cid":"oc_p1","fid":"ou_alice","ftype":"user","from":"Alice","type":"text","t":"2026-07-01 09:31","pos":4,"text":"好的"}
+{"mid":"m5","cid":"oc_p1","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 14:00","pos":5,"text":"那个需求今天上线了"}
+{"mid":"m6","cid":"oc_p1","fid":"ou_alice","ftype":"user","from":"Alice","type":"text","t":"2026-07-01 14:05","pos":6,"text":"好的"}
+{"mid":"m7","cid":"oc_p1","fid":"ou_app1","ftype":"app","from":"某机器人","type":"text","t":"2026-07-01 14:06","pos":7,"text":"打卡提醒"}

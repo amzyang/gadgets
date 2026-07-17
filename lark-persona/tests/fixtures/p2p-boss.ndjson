@@ -1,0 +1,10 @@
+{"mid":"b1","cid":"oc_p2","fid":"ou_boss","ftype":"user","from":"老板","type":"text","t":"2026-07-01 09:00","pos":1,"text":"帮我拉一下这周数据"}
+{"mid":"b2","cid":"oc_p2","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 09:01","pos":2,"text":"收到"}
+{"mid":"b3","cid":"oc_p2","fid":"ou_boss","ftype":"user","from":"老板","type":"text","t":"2026-07-01 09:30","pos":3,"text":"麻烦今天之内给我"}
+{"mid":"b4","cid":"oc_p2","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 09:31","pos":4,"text":"好的"}
+{"mid":"b5","cid":"oc_p2","fid":"ou_boss","ftype":"user","from":"老板","type":"text","t":"2026-07-01 10:00","pos":5,"text":"另外尽快同步一下进展"}
+{"mid":"b6","cid":"oc_p2","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 10:01","pos":6,"text":"好嘞"}
+{"mid":"b7","cid":"oc_p2","fid":"ou_boss","ftype":"user","from":"老板","type":"text","t":"2026-07-01 11:00","pos":7,"text":"记得优先处理一下线上问题"}
+{"mid":"b8","cid":"oc_p2","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 11:01","pos":8,"text":"收到"}
+{"mid":"b9","cid":"oc_p2","fid":"ou_boss","ftype":"user","from":"老板","type":"text","t":"2026-07-01 12:00","pos":9,"text":"发我一下报告"}
+{"mid":"b10","cid":"oc_p2","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-01 12:01","pos":10,"text":"好的"}

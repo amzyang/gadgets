@@ -1,0 +1,3 @@
+{"mid":"om_app","cid":"oc_t1","fid":"ou_app","ftype":"app","from":"考勤机器人","type":"text","t":"2026-07-01 10:00","pos":8,"text":"打卡提醒"}
+{"mid":"om_1","cid":"oc_t1","fid":"ou_a","ftype":"user","from":"甲","type":"text","t":"2026-07-01 10:00","pos":9,"text":"第一条"}
+{"mid":"om_2","cid":"oc_t1","fid":"ou_b","ftype":"user","from":"乙","type":"text","t":"2026-07-01 10:05","pos":11,"text":"第二条"}

@@ -1,0 +1,2 @@
+{"text":"这条是群消息","from":"张三","chat":"测试群","t":"2026-07-17 12:01","ctype":"group","type":"text","mid":"om_raw1","cid":"oc_group1","fid":"ou_alice","ftype":"user","link":"lark://applink.feishu.cn/client/chat/open?openChatId=oc_group1&position=10"}
+{"text":"私聊内容","from":"李四","chat":null,"t":"2026-07-17 12:02","ctype":"p2p","type":"text","mid":"om_raw2","cid":"oc_p2p1","fid":"ou_bob","ftype":"user","link":"lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"}

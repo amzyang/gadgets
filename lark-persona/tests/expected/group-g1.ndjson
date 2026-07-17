@@ -1,0 +1,2 @@
+{"kind":"group","peer":"ou_bob","name":"Bob","cid":"oc_g1","gname":"测试群","g_msgs":2,"at_me":1,"at_by_me":1,"dir_at_me":1,"owner":true}
+{"kind":"group","peer":"ou_carol","name":"Carol","cid":"oc_g1","gname":"测试群","g_msgs":1,"at_me":0,"at_by_me":0,"dir_at_me":0,"owner":false}

@@ -1,0 +1,92 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "has_more": true,
+    "messages": [
+      {
+        "chat_id": "oc_group2",
+        "content": "王五是技术部的\n李四是产品部的\n你先别补 先查查数据没有信息的原因，他俩之前应该都是录入了的 看是删了还是丢了",
+        "create_time": "2026-07-17 15:57",
+        "deleted": false,
+        "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_group2&position=1600",
+        "message_id": "om_reply1",
+        "message_position": "1600",
+        "msg_type": "text",
+        "sender": {
+          "id": "ou_dave",
+          "id_type": "open_id",
+          "name": "王五",
+          "sender_type": "user",
+          "tenant_key": "t1"
+        },
+        "updated": false
+      },
+      {
+        "chat_id": "oc_group2",
+        "content": "@王五",
+        "create_time": "2026-07-17 15:52",
+        "deleted": false,
+        "mentions": [
+          {
+            "id": "ou_dave",
+            "key": "@_user_1",
+            "name": "王五"
+          }
+        ],
+        "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_group2&position=1599",
+        "message_id": "om_mention1",
+        "message_position": "1599",
+        "msg_type": "text",
+        "sender": {
+          "id": "ou_erin",
+          "id_type": "open_id",
+          "name": "赵六",
+          "sender_type": "user",
+          "tenant_key": "t1"
+        },
+        "update_time": "2026-07-17 15:52",
+        "updated": true
+      },
+      {
+        "chat_id": "oc_group2",
+        "content": "王五和李四是哪个部门的呢，我计划给他俩部门信息补充全，方便统计下数据",
+        "create_time": "2026-07-17 15:51",
+        "deleted": false,
+        "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_group2&position=1598",
+        "message_id": "om_plain1",
+        "message_position": "1598",
+        "msg_type": "text",
+        "sender": {
+          "id": "ou_erin",
+          "id_type": "open_id",
+          "name": "赵六",
+          "sender_type": "user",
+          "tenant_key": "t1"
+        },
+        "updated": false
+      },
+      {
+        "chat_id": "oc_group2",
+        "content": "[Image: img_v3_testdata_synthetic_0000000000g]",
+        "create_time": "2026-07-17 15:51",
+        "deleted": false,
+        "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_group2&position=1597",
+        "message_id": "om_img1",
+        "message_position": "1597",
+        "msg_type": "image",
+        "sender": {
+          "id": "ou_erin",
+          "id_type": "open_id",
+          "name": "赵六",
+          "sender_type": "user",
+          "tenant_key": "t1"
+        },
+        "update_time": "2026-07-17 15:51",
+        "updated": true
+      }
+    ],
+    "page_token": "pt_synthetic_testdata_0001",
+    "total": 10
+  }
+}

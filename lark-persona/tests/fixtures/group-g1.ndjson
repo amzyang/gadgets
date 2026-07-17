@@ -1,0 +1,4 @@
+{"mid":"g1","cid":"oc_g1","fid":"ou_SELF","ftype":"user","from":"我","type":"text","t":"2026-07-02 10:00","pos":1,"text":"<at user_id=\"ou_bob\">Bob</at> 帮忙看下这个问题"}
+{"mid":"g2","cid":"oc_g1","fid":"ou_bob","ftype":"user","from":"Bob","type":"text","t":"2026-07-02 10:05","pos":2,"text":"<at user_id=\"ou_SELF\">我</at> 尽快同步一下进展"}
+{"mid":"g3","cid":"oc_g1","fid":"ou_bob","ftype":"user","from":"Bob","type":"text","t":"2026-07-02 10:10","pos":3,"text":"另外记得写周报"}
+{"mid":"g4","cid":"oc_g1","fid":"ou_carol","ftype":"user","from":"Carol","type":"text","t":"2026-07-02 10:15","pos":4,"text":"哈哈哈"}
