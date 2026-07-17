@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS fetched (cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, card TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
 `
 
 func OpenStore(stateDir string) (*Store, error) {
@@ -189,6 +190,44 @@ func (s *Store) SetFetchCursor(cid string, ts int64) error {
 func (s *Store) ClampFetchCursors(ts int64) error {
 	_, err := s.db.Exec(`UPDATE fetched SET ts = ?`, ts)
 	return err
+}
+
+// ---------- restricted（防泄密模式群：API 禁止读取消息，跳过并按 TTL 重探）----------
+
+func (s *Store) RestrictedGet(cid string) (int64, bool) {
+	var ts int64
+	err := s.db.QueryRow(`SELECT ts FROM restricted WHERE cid = ?`, cid).Scan(&ts)
+	return ts, err == nil
+}
+
+func (s *Store) RestrictedSet(cid, name string, ts int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO restricted(cid, name, ts) VALUES(?, ?, ?)
+		 ON CONFLICT(cid) DO UPDATE SET name = excluded.name, ts = excluded.ts`,
+		cid, name, ts)
+	return err
+}
+
+func (s *Store) RestrictedClear(cid string) error {
+	_, err := s.db.Exec(`DELETE FROM restricted WHERE cid = ?`, cid)
+	return err
+}
+
+func (s *Store) RestrictedList() ([]RestrictedChat, error) {
+	rows, err := s.db.Query(`SELECT cid, name, ts FROM restricted ORDER BY cid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RestrictedChat
+	for rows.Next() {
+		var rc RestrictedChat
+		if err := rows.Scan(&rc.Cid, &rc.Name, &rc.Since); err != nil {
+			return nil, err
+		}
+		out = append(out, rc)
+	}
+	return out, rows.Err()
 }
 
 // ---------- pending（卡片草稿+卡片原稿）----------

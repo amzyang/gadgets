@@ -13,6 +13,7 @@ type listFake struct {
 	fakeCLI
 	chats       []ChatMeta
 	msgs        map[string]string // cid → raw JSON 响应
+	errs        map[string]error  // cid → ChatMessages 注入错误
 	chatCalls   []string
 	searchCalls int
 }
@@ -21,6 +22,9 @@ func (f *listFake) ChatList() ([]ChatMeta, error) { return f.chats, nil }
 
 func (f *listFake) ChatMessages(cid, start string) ([]byte, error) {
 	f.chatCalls = append(f.chatCalls, cid)
+	if err, ok := f.errs[cid]; ok {
+		return nil, err
+	}
 	if r, ok := f.msgs[cid]; ok {
 		return []byte(r), nil
 	}
@@ -162,6 +166,101 @@ func TestTickHasMore(t *testing.T) {
 	want := parseMinute(lastT)
 	if ts, _ := p.Store.FetchCursor("oc_a"); ts != want {
 		t.Errorf("has_more cursor: got %d, want %d (last msg time)", ts, want)
+	}
+}
+
+func restrictedErr() error {
+	return &ExecError{Args: []string{"im", "+chat-messages-list"},
+		Stderr: `{"ok":false,"code":231203,"msg":"The chat type is not supported, ext=Chat open Restricted Mode, don't allow copying or forwarding messages"}`,
+		Err:    fmt.Errorf("ok=false")}
+}
+
+// 防泄密群：首次检测发一次 alert 并持久标记，标记未过期的后续 tick 不再拉取。
+func TestTickRestrictedMode(t *testing.T) {
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_r", Name: "产品技术部", Mode: "group"}},
+		errs:  map[string]error{"oc_r": restrictedErr()},
+	}
+	p, events := newTestPoller(t, f, 2000)
+	p.Store.SetFetchCursor("oc_r", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*events) != 1 || !strings.Contains(string((*events)[0]), `"kind":"restricted"`) ||
+		!strings.Contains(string((*events)[0]), "产品技术部") {
+		t.Fatalf("want 1 restricted alert, got %q", *events)
+	}
+	if ts, _ := p.Store.FetchCursor("oc_r"); ts != 1000 {
+		t.Errorf("cursor should be kept, got %d", ts)
+	}
+	if _, ok := p.Store.RestrictedGet("oc_r"); !ok {
+		t.Error("want restricted marker persisted")
+	}
+
+	// 标记未过期：跳过拉取，不重复告警
+	if err := p.tick(context.Background(), 2100, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.chatCalls) != 1 {
+		t.Errorf("marked chat should be skipped, calls: %v", f.chatCalls)
+	}
+	if len(*events) != 1 {
+		t.Errorf("want no duplicate alert, got %d events", len(*events))
+	}
+}
+
+// TTL 重探：失败仅刷新标记不重复告警；成功清除标记并把游标夹到当下（积压不涌实时链路）。
+func TestTickRestrictedReprobe(t *testing.T) {
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_r", Name: "产品技术部", Mode: "group"}},
+		errs:  map[string]error{"oc_r": restrictedErr()},
+	}
+	p, events := newTestPoller(t, f, 2000)
+	p.Store.SetFetchCursor("oc_r", 1000)
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+
+	ttl := restrictedReprobe()
+
+	// 重探失败：发生一次拉取，无新告警；标记 ts 刷新使下一 tick 继续跳过
+	if err := p.tick(context.Background(), 2000+ttl+1, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.chatCalls) != 2 {
+		t.Errorf("want reprobe fetch, calls: %v", f.chatCalls)
+	}
+	if len(*events) != 1 {
+		t.Errorf("want no duplicate alert, got %d events", len(*events))
+	}
+	if err := p.tick(context.Background(), 2000+ttl+100, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.chatCalls) != 2 {
+		t.Errorf("refreshed marker should skip, calls: %v", f.chatCalls)
+	}
+
+	// 重探成功：清除标记、游标夹到当下，随后恢复常规拉取
+	delete(f.errs, "oc_r")
+	now2 := 2000 + 2*ttl + 2
+	if err := p.tick(context.Background(), now2, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.chatCalls) != 3 {
+		t.Errorf("want reprobe fetch after ttl, calls: %v", f.chatCalls)
+	}
+	if _, ok := p.Store.RestrictedGet("oc_r"); ok {
+		t.Error("marker should be cleared after successful reprobe")
+	}
+	if ts, _ := p.Store.FetchCursor("oc_r"); ts != now2 {
+		t.Errorf("cursor should clamp to now, got %d, want %d", ts, now2)
+	}
+	if err := p.tick(context.Background(), now2+1, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.chatCalls) != 4 {
+		t.Errorf("want normal fetch resumed, calls: %v", f.chatCalls)
 	}
 }
 

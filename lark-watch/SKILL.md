@@ -133,6 +133,11 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 - `kind:"auth-expiring"`：token 刷新期 < 24h，按 msg 转告提醒重新
   `lark-cli auth login`；Monitor 继续运行，无需重启。
 - `kind:"api"`：连续调用失败（仍在退避重试），转告即可。
+- `kind:"restricted"`：某群开启防泄密模式（禁止复制/转发），OpenAPI 无法读取
+  该群消息（拉取与 search 均被服务端屏蔽，与 token/scope 无关）。二进制已自动
+  跳过该群并每 24h 重探一次（`LW_RESTRICTED_REPROBE` 可调），告警仅发一次。
+  转告用户：该群不在监控覆盖内，如需覆盖只能请群管理员关闭防泄密模式；
+  被跳过的群列在 `status` 输出的 `restricted_chats` 字段。
 - `kind:"card-daemon"`：卡片回调监听连续快速失败（自动重启中，仅卡片按钮降级，
   轮询不受影响），转告即可。
 - Monitor 意外退出：看 stderr（Monitor 输出文件），可自动重启一次；再次失败
@@ -233,9 +238,11 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 ## 状态与排错
 
 - 状态库：`~/.local/state/lark-watch/lark-watch.db`（SQLite，`sqlite3` 可直接查；
-  表：meta/seen/handled/processed/fetched/pending/digest_buf/catchup_last）。
+  表：meta/seen/handled/processed/fetched/pending/digest_buf/catchup_last/restricted）。
   同目录 `*.imported` 是 bash 时代的留档，可忽略。
-- 健康检查：`{SKILL_DIR}/bin/lark-watch status`。
+- 健康检查：`{SKILL_DIR}/bin/lark-watch status`。`restricted_chats` 非空表示
+  这些群开启了防泄密模式、监控无法覆盖（见「alert / Monitor 退出」的
+  `kind:"restricted"`）。
 - 重置监控：TaskStop Monitor 后删 lark-watch.db 再重启（会重新 baseline）。
 - 重建二进制：`cd {SKILL_DIR}/go && make install`（vet + test + build）。
 - 单元测试：`cd {SKILL_DIR}/go && go test ./...`。

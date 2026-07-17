@@ -2,6 +2,7 @@ package watch
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -49,6 +50,25 @@ func TestParseAuthStatusUnavailable(t *testing.T) {
 		if _, err := parseAuthStatus([]byte(in)); err == nil {
 			t.Errorf("%s: want error, got nil", name)
 		}
+	}
+}
+
+func TestIsRestrictedModeError(t *testing.T) {
+	// 取自真实 231203 响应：群开启防泄密模式，API 禁止读取消息
+	envelope := &ExecError{Args: []string{"im", "+chat-messages-list"},
+		Stderr: `{"ok":false,"code":231203,"msg":"The chat type is not supported, ext=Chat open Restricted Mode, don't allow copying or forwarding messages"}`,
+		Err:    fmt.Errorf("ok=false")}
+	if !IsRestrictedModeError(envelope) {
+		t.Fatal("231203 envelope: want true")
+	}
+	if !IsRestrictedModeError(errors.New("ext=Chat open Restricted Mode")) {
+		t.Fatal("text marker: want true")
+	}
+	if IsRestrictedModeError(errors.New("token expired")) {
+		t.Fatal("unrelated error: want false")
+	}
+	if IsRestrictedModeError(nil) {
+		t.Fatal("nil: want false")
 	}
 }
 

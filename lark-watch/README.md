@@ -68,6 +68,14 @@ Claude 会启动后台监控并常驻：P0 消息（私聊/@你/会议/重点人
 
 状态存 `~/.local/state/lark-watch/lark-watch.db`（SQLite，只落本机）。
 
+## 已知限制
+
+开启防泄密模式（禁止复制/转发）的群，飞书 OpenAPI 拒绝读取其消息
+（错误码 231203，消息拉取与搜索均被屏蔽），监控无法覆盖。lark-watch
+检测到后会自动跳过该群（每 24h 重探一次）并告警一次；被跳过的群可在
+`bin/lark-watch status` 输出的 `restricted_chats` 字段查看。如需覆盖，
+只能请群管理员关闭防泄密模式。
+
 ## 卡住了？
 
 飞书上找邹洋，或把报错原文丢给 Claude Code。

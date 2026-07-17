@@ -177,6 +177,7 @@ func buildStatus(s *Store, cli LarkCLI, now time.Time) Status {
 		ConsumerState: consumer, Pending: s.PendingCount(),
 		DigestBuffered: s.DigestCount(), LastFlush: lastFlush,
 	}
+	st.RestrictedChats, _ = s.RestrictedList()
 	auth, err := cli.AuthSelf()
 	if err != nil {
 		st.AuthWarning = authAlertMsg(err)

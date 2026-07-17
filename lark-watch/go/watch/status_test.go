@@ -47,6 +47,20 @@ func TestBuildStatusAuthExpiring(t *testing.T) {
 	}
 }
 
+func TestBuildStatusRestricted(t *testing.T) {
+	s, _ := openTestStore(t)
+	s.RestrictedSet("oc_r", "产品技术部", 1000)
+
+	st := buildStatus(s, &authFake{info: AuthInfo{OpenID: "ou_x"}}, time.Unix(2000, 0))
+	if len(st.RestrictedChats) != 1 {
+		t.Fatalf("restricted chats: %+v", st.RestrictedChats)
+	}
+	rc := st.RestrictedChats[0]
+	if rc.Cid != "oc_r" || rc.Name != "产品技术部" || rc.Since != 1000 {
+		t.Fatalf("restricted chat fields: %+v", rc)
+	}
+}
+
 func TestBuildStatusAuthFailed(t *testing.T) {
 	s, _ := openTestStore(t)
 	cli := &authFake{err: errors.New("token expired")}

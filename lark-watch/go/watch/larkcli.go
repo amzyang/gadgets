@@ -60,6 +60,16 @@ func IsAuthError(err error) bool {
 	return false
 }
 
+// IsRestrictedModeError 识别群防泄密模式导致的消息读取禁止（错误码 231203）。
+// 限制加在会话级别，与 token/scope 无关，且 search 通道同样被屏蔽——重试无意义。
+func IsRestrictedModeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "231203") || strings.Contains(s, "Restricted Mode")
+}
+
 // ExecLarkCLI 通过 exec 调用 lark-cli。
 type ExecLarkCLI struct {
 	Bin string // 默认 "lark-cli"

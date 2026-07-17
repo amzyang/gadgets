@@ -108,18 +108,26 @@ type Backlog struct {
 	OfflineSecs int64  `json:"offline_secs"`
 }
 
+// RestrictedChat 是开启防泄密模式而被跳过监控的群（API 无法读取，status 可见）。
+type RestrictedChat struct {
+	Cid   string `json:"cid"`
+	Name  string `json:"name"`
+	Since int64  `json:"since"`
+}
+
 // Status 是 status 子命令的健康 JSON。
 type Status struct {
-	Cursor               int64  `json:"cursor"`
-	Heartbeat            int64  `json:"heartbeat"`
-	HeartbeatAge         int64  `json:"heartbeat_age_secs"`
-	ConsumerState        string `json:"consumer_state"`
-	Pending              int    `json:"pending"`
-	DigestBuffered       int    `json:"digest_buffered"`
-	LastFlush            int64  `json:"last_flush"`
-	AuthOK               bool   `json:"auth_ok"`
-	AuthRefreshExpiresIn int64  `json:"auth_refresh_expires_in_secs,omitempty"`
-	AuthWarning          string `json:"auth_warning,omitempty"`
+	Cursor               int64            `json:"cursor"`
+	Heartbeat            int64            `json:"heartbeat"`
+	HeartbeatAge         int64            `json:"heartbeat_age_secs"`
+	ConsumerState        string           `json:"consumer_state"`
+	Pending              int              `json:"pending"`
+	DigestBuffered       int              `json:"digest_buffered"`
+	LastFlush            int64            `json:"last_flush"`
+	RestrictedChats      []RestrictedChat `json:"restricted_chats,omitempty"`
+	AuthOK               bool             `json:"auth_ok"`
+	AuthRefreshExpiresIn int64            `json:"auth_refresh_expires_in_secs,omitempty"`
+	AuthWarning          string           `json:"auth_warning,omitempty"`
 }
 
 // EncodeLine 输出单行 JSON + 换行，不转义 HTML（对齐 jq 输出，golden 做字节断言）。

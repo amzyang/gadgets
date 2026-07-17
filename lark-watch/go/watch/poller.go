@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"time"
 )
@@ -36,6 +37,9 @@ const searchLookback = 120
 
 func earlyStopK() int   { return envInt("LW_EARLY_STOP", 8) }
 func searchEveryN() int { return envInt("LW_SEARCH_EVERY", 10) }
+
+// restrictedReprobe 是防泄密群标记的重探间隔秒数（群可能事后关闭防泄密模式）。
+func restrictedReprobe() int64 { return int64(envInt("LW_RESTRICTED_REPROBE", 86400)) }
 
 // Poller 是实时监控循环。Out 为事件行输出（run 模式下由单写者串行化）。
 // 拉取走「chat-list 活跃降序 + 逐会话增量」（不依赖搜索索引，不漏、低延迟）；
@@ -166,6 +170,10 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 		if streak >= earlyStopK() {
 			break
 		}
+		restrictedAt, wasRestricted := s.RestrictedGet(ch.Cid)
+		if wasRestricted && nowEpoch-restrictedAt < restrictedReprobe() {
+			continue // 防泄密群拉取必失败，标记过期后才重探
+		}
 		cursor, ok := s.FetchCursor(ch.Cid)
 		if !ok {
 			// 懒初始化：新会话（含首启全量）从当下开始，历史归 catchup。
@@ -178,7 +186,18 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 			if IsAuthError(err) {
 				return err
 			}
+			if IsRestrictedModeError(err) {
+				p.markRestricted(ch, wasRestricted, nowEpoch)
+				continue
+			}
 			logf("chat %s fetch failed (cursor kept): %v", ch.Cid, err)
+			continue
+		}
+		if wasRestricted {
+			// 重探成功：防泄密已关闭。游标夹到当下（积压不涌实时链路，对齐停机夹紧哲学）
+			s.RestrictedClear(ch.Cid)
+			s.SetFetchCursor(ch.Cid, nowEpoch)
+			logf("chat %s (%s) restricted mode lifted, resuming", ch.Cid, ch.Name)
 			continue
 		}
 		msgs, hasMore, err := TrimChatMessages(raw, ch.Name, ch.Mode)
@@ -236,6 +255,16 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 		}
 	}
 	return nil
+}
+
+// markRestricted 持久标记防泄密群；仅首次检测告警（重探失败只刷新时间戳）。
+func (p *Poller) markRestricted(ch ChatMeta, known bool, now int64) {
+	p.Store.RestrictedSet(ch.Cid, ch.Name, now)
+	logf("chat %s (%s) restricted mode, skipped (reprobe in %ds)", ch.Cid, ch.Name, restrictedReprobe())
+	if !known {
+		p.emit(NewAlert("restricted",
+			fmt.Sprintf("群「%s」开启防泄密模式，API 无法读取消息（search 亦被屏蔽），已跳过监控", ch.Name)))
+	}
 }
 
 func (p *Poller) flushDigest() {

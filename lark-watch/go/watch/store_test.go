@@ -208,3 +208,34 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// restricted 标记：Set/Get/Clear/List 往返，Set 幂等刷新时间戳。
+func TestRestrictedMarker(t *testing.T) {
+	s, _ := openTestStore(t)
+	if _, ok := s.RestrictedGet("oc_a"); ok {
+		t.Fatal("empty store: want no marker")
+	}
+	s.RestrictedSet("oc_a", "产品技术部", 1000)
+	s.RestrictedSet("oc_b", "群B", 2000)
+	if ts, ok := s.RestrictedGet("oc_a"); !ok || ts != 1000 {
+		t.Fatalf("get oc_a: %d %v, want 1000 true", ts, ok)
+	}
+	s.RestrictedSet("oc_a", "产品技术部", 3000)
+	if ts, _ := s.RestrictedGet("oc_a"); ts != 3000 {
+		t.Fatalf("refresh ts: got %d, want 3000", ts)
+	}
+	list, err := s.RestrictedList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].Cid != "oc_a" || list[0].Name != "产品技术部" || list[0].Since != 3000 {
+		t.Fatalf("list: %+v", list)
+	}
+	s.RestrictedClear("oc_a")
+	if _, ok := s.RestrictedGet("oc_a"); ok {
+		t.Fatal("clear: want no marker")
+	}
+	if list, _ := s.RestrictedList(); len(list) != 1 {
+		t.Fatalf("list after clear: %+v", list)
+	}
+}
