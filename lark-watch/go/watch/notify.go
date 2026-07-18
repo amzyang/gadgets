@@ -138,6 +138,34 @@ func RunNotify(ctx context.Context, script string, batch []Message) {
 		logf("notify suppressed: Lark frontmost and user active")
 		return
 	}
+	bellFn(ctx)
+	err := runNotifyScript(ctx, script, batchNotifyEnv(batch)...)
+	if err != nil && ctx.Err() == nil {
+		logf("notify command failed: %v", err)
+	}
+}
+
+// StartNotify 同 RunNotify，但脚本 Start 后不等待退出：send-card 短命进程释放
+// 延迟通知用——弹窗类脚本会阻塞到用户点击，不能拖住 send-card 返回；
+// 进程退出后已 fork 的脚本继续存活。
+func StartNotify(ctx context.Context, script string, batch []Message) {
+	if shouldSuppressNotify(ctx) {
+		logf("notify suppressed: Lark frontmost and user active")
+		return
+	}
+	bellFn(ctx)
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), batchNotifyEnv(batch)...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		logf("notify command failed: %v", err)
+	}
+}
+
+// batchNotifyEnv 是批次通知的完整 LW_* 环境：标题（多条带条数）、每条一行的
+// 聚合摘要、首条的链接与扩展字段。
+func batchNotifyEnv(batch []Message) []string {
 	first := batch[0]
 	lines := make([]string, 0, len(batch))
 	for _, m := range batch {
@@ -152,18 +180,14 @@ func RunNotify(ctx context.Context, script string, batch []Message) {
 		title = fmt.Sprintf("飞书 P0（%d 条）", len(batch))
 	}
 	summary := strings.Join(lines, "\n")
-	bellFn(ctx)
-	err := runNotifyScript(ctx, script, append(notifyEnv(title, summary, first.Link),
+	return append(notifyEnv(title, summary, first.Link),
 		"LW_COUNT="+strconv.Itoa(len(batch)),
 		"LW_FROM="+deref(first.From),
 		"LW_CHAT="+deref(first.Chat),
 		"LW_CTYPE="+first.Ctype,
 		"LW_TYPE="+first.Type,
 		"LW_TEXT="+first.Text,
-	)...)
-	if err != nil && ctx.Err() == nil {
-		logf("notify command failed: %v", err)
-	}
+	)
 }
 
 // notifyEnv 是 LW_* 基础环境变量（标题/内容/摘要/链接）；批次调用再追加扩展字段。

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -456,5 +458,103 @@ func TestClampFetchCursors(t *testing.T) {
 		if ts, ok := s.FetchCursor(cid); !ok || ts != 5000 {
 			t.Fatalf("clamp %s: %d %v", cid, ts, ok)
 		}
+	}
+}
+
+// 通知延迟：配置 notify 脚本时，文本 P0 不即时执行脚本（入延迟队列等草稿），
+// 音视频会议仍即时弹出；到期后由 flushDueNotify 兜底释放。
+func TestTickDefersNotifyUntilDraftOrTimeout(t *testing.T) {
+	rang := stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "帮我看个问题", "2026-07-17 12:00"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(out); err == nil {
+		t.Fatal("notify script ran at tick time, want deferred")
+	}
+	if *rang != 0 {
+		t.Errorf("bell rang %d times at tick time, want 0", *rang)
+	}
+
+	// 未到期不释放；到期释放且内容与即时通知一致
+	p.flushDueNotify(context.Background(), 2000+notifyGraceSecs()-1)
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(out); err == nil {
+		t.Fatal("notify released before grace expired")
+	}
+	p.flushDueNotify(context.Background(), 2000+notifyGraceSecs())
+	if got := string(waitForFile(t, out)); got != "张三（私聊）: 帮我看个问题" {
+		t.Errorf("deferred notify message: got %q", got)
+	}
+	if *rang != 1 {
+		t.Errorf("bell rang %d times after flush, want 1", *rang)
+	}
+}
+
+// 音视频会议不延迟：即时执行通知脚本。
+func TestTickNotifiesVCImmediately(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawVCJSON("om_v", "ou_alice", "张三", "2026-07-17 12:00"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(waitForFile(t, out)); got != "张三（私聊）: 发起了音视频会议" {
+		t.Errorf("vc notify message: got %q", got)
+	}
+	if msgs, _ := p.Store.NotifyDeferTakeDue(1 << 40); len(msgs) != 0 {
+		t.Errorf("vc must not enter defer queue: %v", msgs)
+	}
+}
+
+// LW_NOTIFY_GRACE=0 恢复全部即时通知。
+func TestTickNotifyGraceZeroImmediate(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	t.Setenv("LW_NOTIFY_GRACE", "0")
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "在吗", "2026-07-17 12:00"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(waitForFile(t, out)); got != "张三（私聊）: 在吗" {
+		t.Errorf("immediate notify message: got %q", got)
+	}
+	if msgs, _ := p.Store.NotifyDeferTakeDue(1 << 40); len(msgs) != 0 {
+		t.Errorf("grace=0 must not defer: %v", msgs)
 	}
 }

@@ -39,6 +39,11 @@ const searchLookback = 120
 func earlyStopK() int   { return envInt("LW_EARLY_STOP", 8) }
 func searchEveryN() int { return envInt("LW_SEARCH_EVERY", 10) }
 
+// notifyGraceSecs 是 P0 系统通知的延迟窗口：需要起草回复的 P0 先压住通知，
+// 等草稿卡片（send-card）发出后再展示；窗口内未发卡（模型判定无需回复、起草
+// 超时）则照常弹出兜底。<=0 恢复全部即时通知。
+func notifyGraceSecs() int64 { return int64(envInt("LW_NOTIFY_GRACE", 180)) }
+
 // restrictedReprobe 是防泄密群标记的重探间隔秒数（群可能事后关闭防泄密模式）。
 func restrictedReprobe() int64 { return int64(envInt("LW_RESTRICTED_REPROBE", 86400)) }
 
@@ -92,6 +97,12 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		}
 	}
 
+	// 上次运行遗留的延迟通知：新鲜的留给首轮 flush 照常释放，停机太久的
+	// 直接丢弃——重启后弹陈旧消息只会误导（对齐游标夹紧哲学）。
+	if n := s.NotifyDeferPurge(p.now() - MaxGap()); n > 0 {
+		logf("dropped %d stale deferred notification(s)", n)
+	}
+
 	logf("poller ready self=%s interval=%s digest=%ds/%dmsgs early-stop=%d search-every=%d",
 		self, p.Interval, p.DigestWindow, p.DigestMax, earlyStopK(), searchEveryN())
 
@@ -105,6 +116,8 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		}
 
 		nowEpoch := p.now()
+		// 到期兜底先于 tick：API 故障退避期间延迟通知也能按时释放
+		p.flushDueNotify(ctx, nowEpoch)
 		if err := p.tick(ctx, nowEpoch, self); err != nil {
 			fails++
 			if IsAuthError(err) {
@@ -164,10 +177,11 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 			s.DigestAppend(p1)
 		}
 		// 通知命令：每 tick 的 P0 批次聚合为一次调用（避免弹窗轰炸），异步不阻塞轮询；
-		// 本人已回复的不打扰（音视频会议豁免）
+		// 本人已回复的不打扰（音视频会议豁免）。需要起草的 P0 延迟到草稿就绪后展示
+		// （见 dispatchNotify）。
 		if batch := notifyBatch(p0, selfLast); len(batch) > 0 {
 			if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
-				go RunNotify(ctx, script, batch)
+				p.dispatchNotify(ctx, script, batch, nowEpoch)
 			}
 		}
 	}()
@@ -339,6 +353,48 @@ func notifyBatch(p0 []Message, selfLast map[string]string) []Message {
 		out = append(out, m)
 	}
 	return out
+}
+
+// dispatchNotify 分流通知批次：音视频会议即时弹（跳过起草，无草稿可等）；
+// 其余 P0 入延迟队列，由 send-card 认领（草稿就绪即通知）或 notifyGraceSecs
+// 超时兜底（flushDueNotify）。延迟入库失败退回即时通知（宁可早弹不可漏弹）。
+func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Message, now int64) {
+	var immediate, deferred []Message
+	for _, m := range batch {
+		if vcTypes[m.Type] {
+			immediate = append(immediate, m)
+		} else {
+			deferred = append(deferred, m)
+		}
+	}
+	if notifyGraceSecs() <= 0 {
+		immediate, deferred = batch, nil
+	}
+	if len(deferred) > 0 {
+		if err := p.Store.NotifyDeferPut(deferred, now+notifyGraceSecs()); err != nil {
+			logf("notify defer failed, notifying now: %v", err)
+			immediate = append(immediate, deferred...)
+		}
+	}
+	if len(immediate) > 0 {
+		go RunNotify(ctx, script, immediate)
+	}
+}
+
+// flushDueNotify 释放到期未被 send-card 认领的延迟通知，内容与即时通知
+// 完全一致，只是晚到。脚本已被删除（通知被关闭）时到期条目直接丢弃。
+func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
+	batch, err := p.Store.NotifyDeferTakeDue(now)
+	if err != nil {
+		logf("notify defer take failed: %v", err)
+		return
+	}
+	if len(batch) == 0 {
+		return
+	}
+	if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
+		go RunNotify(ctx, script, batch)
+	}
 }
 
 // mergeSelfLast 把单批提取结果并入 tick 级累积（保留每会话最大时间）。

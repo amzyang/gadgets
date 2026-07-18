@@ -411,3 +411,49 @@ func TestRestrictedMarker(t *testing.T) {
 		t.Fatalf("list after clear: %+v", list)
 	}
 }
+
+// notify_wait：到期取走、按 mid 认领同会话、陈旧清理；两侧互斥不重复取。
+func TestNotifyDeferStore(t *testing.T) {
+	s := openTestStore(t)
+	err := s.NotifyDeferPut([]Message{
+		{Mid: "om_a1", Cid: "oc_a", Text: "在吗"},
+		{Mid: "om_a2", Cid: "oc_a", Text: "帮我看个问题"},
+		{Mid: "om_b1", Cid: "oc_b", Text: "另一个会话"},
+	}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := s.NotifyDeferTakeDue(999); err != nil || len(got) != 0 {
+		t.Fatalf("before due: want empty, got %v (%v)", got, err)
+	}
+
+	msgs, ok := s.NotifyDeferClaimChat("om_a2")
+	if !ok || len(msgs) != 2 || msgs[0].Mid != "om_a1" || msgs[1].Mid != "om_a2" {
+		t.Fatalf("claim by mid should return whole chat in order: %v %v", msgs, ok)
+	}
+	if _, ok := s.NotifyDeferClaimChat("om_a1"); ok {
+		t.Error("second claim must find nothing")
+	}
+
+	got, err := s.NotifyDeferTakeDue(1000)
+	if err != nil || len(got) != 1 || got[0].Mid != "om_b1" {
+		t.Fatalf("take due: want om_b1 only, got %v (%v)", got, err)
+	}
+	if got, _ := s.NotifyDeferTakeDue(1000); len(got) != 0 {
+		t.Errorf("second take must be empty, got %v", got)
+	}
+}
+
+func TestNotifyDeferPurge(t *testing.T) {
+	s := openTestStore(t)
+	s.NotifyDeferPut([]Message{{Mid: "om_old", Cid: "oc_a"}}, 100)
+	s.NotifyDeferPut([]Message{{Mid: "om_new", Cid: "oc_b"}}, 2000)
+	if n := s.NotifyDeferPurge(1000); n != 1 {
+		t.Fatalf("want 1 purged, got %d", n)
+	}
+	got, _ := s.NotifyDeferTakeDue(9999)
+	if len(got) != 1 || got[0].Mid != "om_new" {
+		t.Errorf("fresh entry should survive purge: %v", got)
+	}
+}

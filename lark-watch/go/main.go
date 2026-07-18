@@ -136,7 +136,7 @@ func dispatch(cmd string, args []string) error {
 			return err
 		}
 		defer s.Close()
-		return watch.RunSendCard(s, cli, *mid, drafts, *original, *from, *scene, *t, *format)
+		return watch.RunSendCard(s, cli, watch.DefaultPaths(), *mid, drafts, *original, *from, *scene, *t, *format)
 
 	case "notify":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
