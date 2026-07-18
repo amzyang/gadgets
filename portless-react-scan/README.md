@@ -32,7 +32,7 @@ react-scan（底层是同作者的 bippy）把自己装成 `window.__REACT_DEVTO
 | --- | --- |
 | npm 依赖 + 项目内 import | 侵入业务仓库；动态 import 晚于 react-dom 初始化会失效，静态 import 又无法被 prod 构建死代码消除 |
 | 官方 CLI | 0.5.x 起只剩 `init`（往项目写代码装依赖），「传 URL 开浏览器」模式停留在 0.4.3，且拉起的是无登录态的全新浏览器 |
-| 官方浏览器扩展 | 可用，但不可钉版本、不能按 `*.localhost` 精确圈定站点 |
+| 官方浏览器扩展 | 可用，但不能按 `*.localhost` 精确圈定站点 |
 | Inssman 等注入规则（URL 方式） | 注入的是动态 `<script src>`，异步加载与 Vite 模块图赛跑，输了就静默失效 |
 
 ## 依赖
@@ -40,12 +40,12 @@ react-scan（底层是同作者的 bippy）把自己装成 `window.__REACT_DEVTO
 | 依赖 | 必需 | 说明 |
 | --- | :---: | --- |
 | Tampermonkey / Violentmonkey | ✅ | 用户脚本管理器 |
-| react-scan@0.5.7（`@require` 经 unpkg） | 自动 | 安装脚本时下载一次（~100KB）并缓存，之后零网络、可离线 |
+| react-scan@latest（`@require` 经 unpkg） | 自动 | 装机/脚本更新时解析为当时最新并缓存（~100KB），之后零网络、可离线 |
 
 ## 可调项 / 升级
 
 - **运行时选项**：控制台 `window.reactScan.setOptions({...})`，如 `{showToolbar: false}`；工具条自身也有开关。
-- **升级 react-scan**：改脚本头 `@require` 里的版本号，同时 bump `@version` 触发已装机器自动更新。
+- **react-scan 版本**：`@require` 指 latest，实际语义是「脚本安装/更新那一刻的最新」——Tampermonkey 会缓存 externals，不会每次页面加载都拉新。拉新时机：本脚本更新时 / 重装脚本 / Tampermonkey 设置 → Externals 调更新间隔。
 - **收窄站点**：不想通配所有 `*.localhost`，在 Tampermonkey 该脚本「设置」页的 User matches / User excludes 里按站点调整，无需改脚本源。
 
 ## 限制
