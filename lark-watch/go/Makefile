@@ -1,12 +1,15 @@
 BIN := ../bin/lark-watch
 GOFLAGS := $(if $(RACE),-race)
 
-.PHONY: install build test
+.PHONY: install build test lint
 
-install: test build
+install: lint test build
 
 build:
 	go build $(GOFLAGS) -o $(BIN) .
+
+lint:
+	golangci-lint run
 
 test:
 	go vet ./...

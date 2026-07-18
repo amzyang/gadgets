@@ -1,0 +1,14 @@
+version: "2"
+
+linters:
+  # 本项目大量错误忽略是刻意的 best-effort 语义（defer Close/Rollback、降级写入），errcheck 噪音大于收益
+  disable:
+    - errcheck
+  enable:
+    - misspell
+    - unconvert
+    - unparam
+
+formatters:
+  enable:
+    - gofmt
