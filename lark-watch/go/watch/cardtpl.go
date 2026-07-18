@@ -71,9 +71,28 @@ func button(label, typ string, value map[string]any) cardElement {
 	}
 }
 
+// padCardFences 适配飞书卡片 markdown 方言：开围栏前须空行才渲染为代码块
+// （post 的 md tag 无此要求）；前一行非空时补空行，闭围栏不动（补了会混入代码内容）。
+func padCardFences(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, "```") {
+			if !inFence && len(out) > 0 && out[len(out)-1] != "" {
+				out = append(out, "")
+			}
+			inFence = !inFence
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
 // RenderDraftCard 渲染草稿确认卡片 JSON（模板实例化从模型侧下沉到二进制）。
 // 仅 mid/draft 必给；scene/from/t/original 为展示字段，空值对应片段整体省略。
-func RenderDraftCard(mid, scene, from, t, original, draft string) string {
+// format=="markdown" 时草稿按 markdown 渲染（预览≈对方所见），否则包围栏展示源文。
+func RenderDraftCard(mid, scene, from, t, original, draft, format string) string {
 	var c draftCard
 	c.Schema = "2.0"
 	c.Config.UpdateMulti = true
@@ -98,10 +117,13 @@ func RenderDraftCard(mid, scene, from, t, original, draft string) string {
 		}
 		c.Body.Elements = append(c.Body.Elements, cardElement{Tag: "markdown", Content: quoted})
 	}
-	// 代码围栏前须空行（飞书卡片 markdown 实测要求）；草稿内含围栏时降级为 '''
-	fenceSafe := strings.ReplaceAll(draft, "```", "'''")
+	draftMD := "**草稿**\n\n" + padCardFences(draft)
+	if format != "markdown" {
+		// 代码围栏前须空行（飞书卡片 markdown 实测要求）；草稿内含围栏时降级为 '''
+		draftMD = "**草稿**\n\n```\n" + strings.ReplaceAll(draft, "```", "'''") + "\n```"
+	}
 	c.Body.Elements = append(c.Body.Elements,
-		cardElement{Tag: "markdown", Content: "**草稿**\n\n```\n" + fenceSafe + "\n```"},
+		cardElement{Tag: "markdown", Content: draftMD},
 		button("发送", "primary_filled", map[string]any{"action": "send", "mid": mid}),
 		button("复制草稿", "default", map[string]any{"action": "copy", "mid": mid}),
 		button("忽略", "default", map[string]any{"action": "ignore", "mid": mid}),

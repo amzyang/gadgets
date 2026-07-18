@@ -35,8 +35,8 @@ func (f *fakeCLI) ChatMessages(cid, start string) ([]byte, error) {
 func (f *fakeCLI) EventConsumeCmd(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, "false") // 测试不跑 consume 子进程
 }
-func (f *fakeCLI) ReplyAsUser(mid, text string) error {
-	f.record("reply %s %s", mid, text)
+func (f *fakeCLI) ReplyAsUser(mid, draft, format string) error {
+	f.record("reply %s %s format=%s", mid, draft, format)
 	if f.failReply {
 		return fmt.Errorf("api error")
 	}
@@ -75,14 +75,14 @@ func cardEvent(eventID, token, action, mid string) []byte {
 func TestCardSend(t *testing.T) {
 	s, _ := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_t1", "测试草稿", testCardContent, 1)
+	s.PendingPut("om_t1", "测试草稿", "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e1", "tok1", "send", "om_t1"), 100)
 
-	if !cli.hasCall("reply om_t1 测试草稿") {
+	if !cli.hasCall("reply om_t1 测试草稿 format=text") {
 		t.Errorf("reply args wrong: %v", cli.calls)
 	}
-	if _, _, ok := s.PendingGet("om_t1"); ok {
+	if _, _, _, ok := s.PendingGet("om_t1"); ok {
 		t.Error("pending should be deleted after send")
 	}
 	if !cli.hasCall("update-card tok1") || !cli.hasCall("已发送") {
@@ -106,7 +106,7 @@ func TestCardSendUsesLocalCardSource(t *testing.T) {
 	s, _ := openTestStore(t)
 	cli := &fakeCLI{}
 	local := `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"LOCAL_CARD_MARKER"},{"tag":"button"}]}}`
-	s.PendingPut("om_t6", "草稿6", local, 1)
+	s.PendingPut("om_t6", "草稿6", "text", local, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e6", "tok6", "send", "om_t6"), 100)
 
@@ -115,14 +115,27 @@ func TestCardSendUsesLocalCardSource(t *testing.T) {
 	}
 }
 
+// markdown 草稿：落盘 format 原样透传给回复发送。
+func TestCardSendMarkdownFormat(t *testing.T) {
+	s, _ := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_t7", "```go\nx\n```", "markdown", testCardContent, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e7", "tok7", "send", "om_t7"), 100)
+
+	if !cli.hasCall("format=markdown") {
+		t.Errorf("format not passed through: %v", cli.calls)
+	}
+}
+
 func TestCardIgnore(t *testing.T) {
 	s, _ := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_t2", "草稿2", testCardContent, 1)
+	s.PendingPut("om_t2", "草稿2", "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e2", "tok2", "ignore", "om_t2"), 100)
 
-	if _, _, ok := s.PendingGet("om_t2"); ok {
+	if _, _, _, ok := s.PendingGet("om_t2"); ok {
 		t.Error("pending should be deleted")
 	}
 	if !cli.hasCall("已忽略") || cli.hasCall("reply") {
@@ -133,14 +146,14 @@ func TestCardIgnore(t *testing.T) {
 func TestCardCopy(t *testing.T) {
 	s, _ := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_t3", "草稿3", testCardContent, 1)
+	s.PendingPut("om_t3", "草稿3", "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e3", "tok3", "copy", "om_t3"), 100)
 
 	if !cli.hasCall("send-text ou_SELF 草稿3") {
 		t.Errorf("copy should send draft text: %v", cli.calls)
 	}
-	if _, _, ok := s.PendingGet("om_t3"); !ok {
+	if _, _, _, ok := s.PendingGet("om_t3"); !ok {
 		t.Error("pending should be kept after copy")
 	}
 	if cli.hasCall("update-card") {
@@ -165,11 +178,11 @@ func TestCardSendMissingPending(t *testing.T) {
 func TestCardSendFailureKeepsPending(t *testing.T) {
 	s, _ := openTestStore(t)
 	cli := &fakeCLI{failReply: true}
-	s.PendingPut("om_t5", "草稿5", testCardContent, 1)
+	s.PendingPut("om_t5", "草稿5", "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e5", "tok5", "send", "om_t5"), 100)
 
-	if _, _, ok := s.PendingGet("om_t5"); !ok {
+	if _, _, _, ok := s.PendingGet("om_t5"); !ok {
 		t.Error("pending should be kept on failure")
 	}
 	if !cli.hasCall("发送失败") {
@@ -179,7 +192,7 @@ func TestCardSendFailureKeepsPending(t *testing.T) {
 
 func TestRenderDraftCard(t *testing.T) {
 	card := RenderDraftCard("om_x", "私聊", "张三", "12:03",
-		`<at user_id="ou_1">邹洋</at> 帮我看下 *这个* <方案>`, "好的，```稍后```回复")
+		`<at user_id="ou_1">邹洋</at> 帮我看下 *这个* <方案>`, "好的，```稍后```回复", "text")
 
 	for _, want := range []string{
 		`"schema":"2.0"`,
@@ -199,9 +212,40 @@ func TestRenderDraftCard(t *testing.T) {
 	}
 }
 
+// markdown 草稿：直接按 markdown 渲染（不包围栏、不降级 ```），围栏前补空行。
+func TestRenderDraftCardMarkdown(t *testing.T) {
+	card := RenderDraftCard("om_md", "", "", "", "", "看这段：\n```go\nx := 1\n```\n跑一下", "markdown")
+
+	for _, want := range []string{
+		"**草稿**\\n\\n看这段：\\n\\n```go\\nx := 1\\n```\\n跑一下", // 卡片方言：围栏前补空行
+		`"action":"send","mid":"om_md"`,
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+	if strings.Contains(card, "'''") {
+		t.Errorf("markdown draft should keep fences: %s", card)
+	}
+}
+
+func TestPadCardFences(t *testing.T) {
+	cases := map[string][2]string{
+		"补空行":    {"文字\n```go\nx\n```", "文字\n\n```go\nx\n```"},
+		"已有空行不动": {"文字\n\n```\nx\n```", "文字\n\n```\nx\n```"},
+		"闭围栏不动":  {"```\nx\n```\n尾注", "```\nx\n```\n尾注"},
+		"无围栏原样":  {"纯文本\n两行", "纯文本\n两行"},
+	}
+	for name, c := range cases {
+		if got := padCardFences(c[0]); got != c[1] {
+			t.Errorf("%s: want %q, got %q", name, c[1], got)
+		}
+	}
+}
+
 // 最小参数（仅 mid+draft）：展示片段整体省略，不渲染空标题/空引用。
 func TestRenderDraftCardMinimal(t *testing.T) {
-	card := RenderDraftCard("om_min", "", "", "", "", "只有草稿")
+	card := RenderDraftCard("om_min", "", "", "", "", "只有草稿", "text")
 
 	for _, want := range []string{
 		`"schema":"2.0"`,
@@ -238,7 +282,7 @@ func TestRenderDoneCard(t *testing.T) {
 
 // 完成态更新头部标题（脱离「待确认」）：发卡渲染标题，改卡替换为完成态标题。
 func TestRenderDoneCardUpdatesTitle(t *testing.T) {
-	draft := RenderDraftCard("om_title", "私聊", "张三", "12:03", "原始消息", "草稿内容")
+	draft := RenderDraftCard("om_title", "私聊", "张三", "12:03", "原始消息", "草稿内容", "text")
 	if !strings.Contains(draft, "回复草稿待确认") {
 		t.Fatalf("draft card should have pending title: %s", draft)
 	}

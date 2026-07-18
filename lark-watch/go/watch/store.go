@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS seen (mid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS handled (event_id TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS processed (cid TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fetched (cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, card TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', card TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
@@ -43,6 +43,12 @@ func OpenStore(stateDir string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
+	}
+	// 旧库补列（CREATE TABLE IF NOT EXISTS 不会给已有表加列）；新库上重复加列，忽略。
+	if _, err := db.Exec(`ALTER TABLE pending ADD COLUMN format TEXT NOT NULL DEFAULT 'text'`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		db.Close()
+		return nil, fmt.Errorf("migrate pending.format: %w", err)
 	}
 	s := &Store{db: db}
 	s.migrateLegacy(stateDir)
@@ -232,17 +238,17 @@ func (s *Store) RestrictedList() ([]RestrictedChat, error) {
 
 // ---------- pending（卡片草稿+卡片原稿）----------
 
-func (s *Store) PendingPut(mid, draft, card string, now int64) error {
+func (s *Store) PendingPut(mid, draft, format, card string, now int64) error {
 	_, err := s.db.Exec(
-		`INSERT INTO pending(mid, draft, card, created) VALUES(?, ?, ?, ?)
-		 ON CONFLICT(mid) DO UPDATE SET draft = excluded.draft, card = excluded.card, created = excluded.created`,
-		mid, draft, card, now)
+		`INSERT INTO pending(mid, draft, format, card, created) VALUES(?, ?, ?, ?, ?)
+		 ON CONFLICT(mid) DO UPDATE SET draft = excluded.draft, format = excluded.format, card = excluded.card, created = excluded.created`,
+		mid, draft, format, card, now)
 	return err
 }
 
-func (s *Store) PendingGet(mid string) (draft, card string, ok bool) {
-	err := s.db.QueryRow(`SELECT draft, card FROM pending WHERE mid = ?`, mid).Scan(&draft, &card)
-	return draft, card, err == nil
+func (s *Store) PendingGet(mid string) (draft, format, card string, ok bool) {
+	err := s.db.QueryRow(`SELECT draft, format, card FROM pending WHERE mid = ?`, mid).Scan(&draft, &format, &card)
+	return draft, format, card, err == nil
 }
 
 func (s *Store) PendingDelete(mid string) error {
@@ -413,7 +419,7 @@ func (s *Store) migrateLegacy(stateDir string) {
 			continue
 		}
 		card, _ := os.ReadFile(filepath.Join(pendingDir, mid+".card.json"))
-		s.PendingPut(mid, string(draft), string(card), 0)
+		s.PendingPut(mid, string(draft), "text", string(card), 0)
 	}
 	os.Rename(pendingDir, pendingDir+".imported")
 	logf("migrated legacy pending/ into sqlite")

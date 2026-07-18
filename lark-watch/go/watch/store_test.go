@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sync"
@@ -85,17 +86,41 @@ func TestFetchedCursors(t *testing.T) {
 
 func TestPendingLifecycle(t *testing.T) {
 	s, _ := openTestStore(t)
-	s.PendingPut("om_1", "草稿", `{"schema":"2.0"}`, 100)
-	draft, card, ok := s.PendingGet("om_1")
-	if !ok || draft != "草稿" || card != `{"schema":"2.0"}` {
-		t.Fatalf("get: %q %q %v", draft, card, ok)
+	s.PendingPut("om_1", "草稿", "markdown", `{"schema":"2.0"}`, 100)
+	draft, format, card, ok := s.PendingGet("om_1")
+	if !ok || draft != "草稿" || format != "markdown" || card != `{"schema":"2.0"}` {
+		t.Fatalf("get: %q %q %q %v", draft, format, card, ok)
 	}
 	if s.PendingCount() != 1 {
 		t.Fatal("count != 1")
 	}
 	s.PendingDelete("om_1")
-	if _, _, ok := s.PendingGet("om_1"); ok {
+	if _, _, _, ok := s.PendingGet("om_1"); ok {
 		t.Fatal("should be deleted")
+	}
+}
+
+// 旧库（pending 无 format 列）打开时补列，存量行按 text 读出。
+func TestPendingFormatMigration(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "lark-watch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, card TEXT NOT NULL, created INTEGER NOT NULL);
+		INSERT INTO pending VALUES('om_old', '旧草稿', '{}', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	draft, format, _, ok := s.PendingGet("om_old")
+	if !ok || draft != "旧草稿" || format != "text" {
+		t.Fatalf("migrated row: %q %q %v", draft, format, ok)
 	}
 }
 
@@ -155,8 +180,8 @@ func TestLegacyMigration(t *testing.T) {
 	if dup, _ := s.HandledSeen("e1", 1, 100); !dup {
 		t.Fatal("handled e1 should be imported")
 	}
-	if draft, _, ok := s.PendingGet("om_1"); !ok || draft != "旧草稿\n" {
-		t.Fatalf("pending: %q %v", draft, ok)
+	if draft, format, _, ok := s.PendingGet("om_1"); !ok || draft != "旧草稿\n" || format != "text" {
+		t.Fatalf("pending: %q %q %v", draft, format, ok)
 	}
 	if cids, _ := s.CatchupLastGet(); len(cids) != 1 || cids[0] != "oc_a" {
 		t.Fatalf("catchup_last: %v", cids)

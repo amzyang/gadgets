@@ -111,6 +111,10 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
   --scene '<私聊|群名>' --t '<消息时间>'
 ```
 
+草稿含代码块/列表/链接等 markdown 构造时加 `--format markdown`——确认后以
+post 富文本回复（对方看到渲染后的代码块），卡片预览也按 markdown 渲染；
+纯对话文本不加（markdown 会误解析 `*`、`_` 等字面字符）。
+
 用户点「发送」= 确认（单击即发，无二次弹窗，幂等键防连点）；「复制草稿」= bot
 回发纯文本（长按可复制）；「忽略」= 丢弃。点击后的一切由二进制直接执行，零模型
 参与。细节与排错见 `{SKILL_DIR}/references/card-confirm-flow.md`。

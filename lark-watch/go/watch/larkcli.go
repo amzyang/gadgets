@@ -18,7 +18,7 @@ type LarkCLI interface {
 	Search(start, end string) ([]byte, error)
 	ChatList() ([]ChatMeta, error)
 	ChatMessages(cid, start string) ([]byte, error)
-	ReplyAsUser(mid, text string) error
+	ReplyAsUser(mid, draft, format string) error
 	SendTextAsBot(userID, text string) error
 	SendCardToUser(userID, cardJSON string) error
 	UpdateCard(token, cardJSON string) error
@@ -180,9 +180,19 @@ func (c *ExecLarkCLI) ChatMessages(cid, start string) ([]byte, error) {
 		"--no-reactions", "--page-size", "50", "--format", "json")
 }
 
-func (c *ExecLarkCLI) ReplyAsUser(mid, text string) error {
-	_, err := c.run("im", "+messages-reply", "--message-id", mid, "--as", "user",
-		"--idempotency-key", mid, "--text", text)
+// replyArgs 构造回复 argv：format=="markdown" 走 --markdown
+// （lark-cli 自动包装为 post 富文本），否则 --text 纯文本。
+func replyArgs(mid, draft, format string) []string {
+	flag := "--text"
+	if format == "markdown" {
+		flag = "--markdown"
+	}
+	return []string{"im", "+messages-reply", "--message-id", mid, "--as", "user",
+		"--idempotency-key", mid, flag, draft}
+}
+
+func (c *ExecLarkCLI) ReplyAsUser(mid, draft, format string) error {
+	_, err := c.run(replyArgs(mid, draft, format)...)
 	return err
 }
 

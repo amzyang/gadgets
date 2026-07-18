@@ -118,16 +118,17 @@ func dispatch(cmd string, args []string) error {
 		from := fs.String("from", "", "发送者名")
 		scene := fs.String("scene", "", "私聊或群名")
 		t := fs.String("t", "", "消息时间")
+		format := fs.String("format", "text", "草稿格式：text | markdown（markdown 以 post 富文本回复）")
 		fs.Parse(args)
-		if *mid == "" || *draft == "" {
-			return fmt.Errorf("usage: lark-watch send-card --mid <mid> --draft <file|-> [--original <text>] [--from <name>] [--scene <私聊|群名>] [--t <time>]")
+		if *mid == "" || *draft == "" || (*format != "text" && *format != "markdown") {
+			return fmt.Errorf("usage: lark-watch send-card --mid <mid> --draft <file|-> [--format text|markdown] [--original <text>] [--from <name>] [--scene <私聊|群名>] [--t <time>]")
 		}
 		s, err := openStore()
 		if err != nil {
 			return err
 		}
 		defer s.Close()
-		return watch.RunSendCard(s, cli, *mid, *draft, *original, *from, *scene, *t)
+		return watch.RunSendCard(s, cli, *mid, *draft, *original, *from, *scene, *t, *format)
 
 	case "notify":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)

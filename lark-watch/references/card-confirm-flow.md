@@ -34,8 +34,11 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 - 必填仅 `--mid`/`--draft`；`--original/--from/--scene/--t` 为卡片展示字段，
   可省略（空值对应片段整体省略），P0 事件里都有、建议带上。
 - `--draft` 接文件路径或 `-`（stdin）。
-- 转义由二进制处理：`<at ...>名字</at>` → `@名字`，markdown 特殊字符转 HTML 实体，
-  草稿内代码围栏降级为 `'''`，草稿在卡片里以代码块展示（围栏前自动空行）。
+- `--format text|markdown`（默认 text）随 pending 落盘：markdown 时草稿在卡片里
+  按 markdown 渲染（保留围栏，开围栏前自动补空行——卡片方言要求），确认后以
+  `--markdown` 走 post 富文本回复；text 时确认后以 `--text` 纯文本回复。
+- 转义由二进制处理：`<at ...>名字</at>` → `@名字`，markdown 特殊字符转 HTML 实体
+  （原始消息引用）；text 格式草稿内代码围栏降级为 `'''`、整体以代码块展示。
 - pending（草稿 + 卡片原稿）写入 SQLite `pending` 表——改卡用本地原稿而非回调的
   `card_content`（服务端 user_dsl 序列化会丢 markdown 换行，实测踩过）。
 - 卡片三按钮：发送（primary_filled，无 confirm 弹窗）/ 复制草稿 / 忽略。

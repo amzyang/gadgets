@@ -53,6 +53,24 @@ func TestParseAuthStatusUnavailable(t *testing.T) {
 	}
 }
 
+func TestReplyArgs(t *testing.T) {
+	text := strings.Join(replyArgs("om_1", "草稿", "text"), " ")
+	if !strings.Contains(text, "--text 草稿") || strings.Contains(text, "--markdown") {
+		t.Fatalf("text format: %s", text)
+	}
+	md := strings.Join(replyArgs("om_1", "```go\nx\n```", "markdown"), " ")
+	if !strings.Contains(md, "--markdown") || strings.Contains(md, "--text") {
+		t.Fatalf("markdown format: %s", md)
+	}
+	for _, argv := range [][]string{replyArgs("om_1", "d", "text"), replyArgs("om_1", "d", "markdown")} {
+		joined := strings.Join(argv, " ")
+		if !strings.Contains(joined, "--message-id om_1") || !strings.Contains(joined, "--idempotency-key om_1") ||
+			!strings.Contains(joined, "--as user") {
+			t.Fatalf("common args missing: %s", joined)
+		}
+	}
+}
+
 func TestIsRestrictedModeError(t *testing.T) {
 	// 取自真实 231203 响应：群开启防泄密模式，API 禁止读取消息
 	envelope := &ExecError{Args: []string{"im", "+chat-messages-list"},

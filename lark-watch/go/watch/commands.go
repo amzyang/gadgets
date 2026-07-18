@@ -126,8 +126,8 @@ func RunIgnoreAdd(paths Paths, pattern string) error {
 }
 
 // RunSendCard 起草卡片：pending 入库 + 渲染 Card 2.0 模板 + bot 私发给用户本人。
-// draftPath 为 "-" 时从 stdin 读草稿。
-func RunSendCard(s *Store, cli LarkCLI, mid, draftPath, original, from, scene, t string) error {
+// draftPath 为 "-" 时从 stdin 读草稿；format（text|markdown）决定回复消息类型与卡片渲染。
+func RunSendCard(s *Store, cli LarkCLI, mid, draftPath, original, from, scene, t, format string) error {
 	var draftBytes []byte
 	var err error
 	if draftPath == "-" {
@@ -147,8 +147,8 @@ func RunSendCard(s *Store, cli LarkCLI, mid, draftPath, original, from, scene, t
 	if err != nil {
 		return err
 	}
-	card := RenderDraftCard(mid, scene, from, t, original, draft)
-	if err := s.PendingPut(mid, draft, card, time.Now().Unix()); err != nil {
+	card := RenderDraftCard(mid, scene, from, t, original, draft, format)
+	if err := s.PendingPut(mid, draft, format, card, time.Now().Unix()); err != nil {
 		return err
 	}
 	if err := cli.SendCardToUser(self.OpenID, card); err != nil {
