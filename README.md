@@ -10,3 +10,4 @@
 | [kitty-claude-teams](kitty-claude-teams/) | 用 tmux shim 让 Claude Code 的 Agent Teams 分屏模式跑在 kitty 终端里（仿 cmux 的 hack）|
 | [lark-watch](lark-watch/) | 飞书消息实时监控 + 回复草稿（Claude Code skill，Go 二进制轮询/分级/卡片确认，永不代发）|
 | [lark-persona](lark-persona/) | 飞书聊天记录蒸馏个人说话风格画像（Claude Code skill，产物本机私有，喂给 lark-watch 起草）|
+| [portless-react-scan](portless-react-scan/) | 给 portless *.localhost dev 站点一键注入 react-scan 重渲染扫描（Tampermonkey 用户脚本，含一键安装）|
