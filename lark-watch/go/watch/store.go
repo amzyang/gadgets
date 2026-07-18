@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -40,19 +41,88 @@ func OpenStore(stateDir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 建表前探测全新库（尚无 pending 表）：全新库建表即最新结构，migrate 据此
+	// 直落最新版本号，不跑迁移循环。
+	var n int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'pending'`).Scan(&n); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("probe fresh: %w", err)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-	// 旧库补列（CREATE TABLE IF NOT EXISTS 不会给已有表加列）；新库上重复加列，忽略。
-	if _, err := db.Exec(`ALTER TABLE pending ADD COLUMN format TEXT NOT NULL DEFAULT 'text'`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
+	if err := migrate(db, n == 0); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("migrate pending.format: %w", err)
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	s := &Store{db: db}
 	s.migrateLegacy(stateDir)
 	return s, nil
+}
+
+// migrations 按序演进已有表结构：migrations[i] 把 PRAGMA user_version 从 i 升到
+// i+1，由 migrate 保证只执行一次。加列时在此追加一条 ALTER，并同步 schema 常量
+// （全新库建表即最新结构，由 OpenStore 的 fresh 探测直落最新版本号，不经此循环）。
+var migrations = []string{
+	// v1: pending.format。曾以 try-ALTER 方式发布（未写版本号），存量库可能已有
+	// 该列，靠 bootstrap 探测跳过。
+	`ALTER TABLE pending ADD COLUMN format TEXT NOT NULL DEFAULT 'text'`,
+}
+
+// migrate 把落后的库补到最新版本；fresh（本次全新建库）只落版本号不跑迁移。
+// 日常路径（版本已最新）纯读、不碰写锁；落后时进 IMMEDIATE 事务先占写锁再重读
+// 版本（双检）——并发 OpenStore（run daemon 与 catchup/send-card 独立进程）的
+// 后到者进锁即见新版本，自然空转。手动 BEGIN 走独占连接，不影响连接池上的其他事务。
+func migrate(db *sql.DB, fresh bool) error {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v == len(migrations) {
+		return nil
+	}
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `ROLLBACK`) // COMMIT 后无事务可回滚，空转即可
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v == len(migrations) {
+		return nil // 并发者已完成迁移
+	}
+	if fresh {
+		v = len(migrations) // 建表即最新结构，无迁移可跑
+	} else if v == 0 {
+		// bootstrap：未写过版本号的存量库按实际结构定位版本——try-ALTER 时期
+		// 的库已有 format 列，即 v1 结构。
+		var n int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT count(*) FROM pragma_table_info('pending') WHERE name = 'format'`).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			v = 1
+		}
+	}
+	for ; v < len(migrations); v++ {
+		if _, err := conn.ExecContext(ctx, migrations[v]); err != nil {
+			return fmt.Errorf("migration %d: %w", v+1, err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations))); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `COMMIT`)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }

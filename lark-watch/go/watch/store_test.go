@@ -100,7 +100,8 @@ func TestPendingLifecycle(t *testing.T) {
 	}
 }
 
-// 旧库（pending 无 format 列）打开时补列，存量行按 text 读出。
+// 旧库（pending 无 format 列）打开时补列并落 user_version，存量行按 text 读出；
+// 二次打开走「版本已最新」快速路径。
 func TestPendingFormatMigration(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "lark-watch.db"))
@@ -113,15 +114,71 @@ func TestPendingFormatMigration(t *testing.T) {
 	}
 	db.Close()
 
-	s, err := OpenStore(dir)
+	for i := 0; i < 2; i++ {
+		s, err := OpenStore(dir)
+		if err != nil {
+			t.Fatalf("open #%d: %v", i, err)
+		}
+		draft, format, _, ok := s.PendingGet("om_old")
+		if !ok || draft != "旧草稿" || format != "text" {
+			t.Fatalf("migrated row: %q %q %v", draft, format, ok)
+		}
+		var v int
+		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
+			t.Fatalf("user_version = %d (err=%v), want %d", v, err, len(migrations))
+		}
+		s.Close()
+	}
+}
+
+// 全新库建表即最新结构，migrate 应直落 len(migrations) 而不执行迁移循环——
+// 追加伪 migration（非法 SQL）后全新 OpenStore 仍成功，即证循环未跑。
+func TestFreshStoreSkipsMigrations(t *testing.T) {
+	migrations = append(migrations, `THIS IS NOT SQL`)
+	defer func() { migrations = migrations[:len(migrations)-1] }()
+
+	s, _ := openTestStore(t)
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
+		t.Fatalf("user_version = %d (err=%v), want %d", v, err, len(migrations))
+	}
+}
+
+// 并发 OpenStore 一个旧库（run daemon 与 catchup/send-card 独立进程场景）：
+// 迁移在写锁内互斥 + 锁内重读版本，两边都成功且读到迁移后的数据。
+// 旧库表齐全、已是 WAL，仅 pending 缺 format 列——全新库的首次并发创建不在
+// 保证范围（实际由 run 单独首建）。
+func TestOpenStoreConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "lark-watch.db")+"?_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	draft, format, _, ok := s.PendingGet("om_old")
-	if !ok || draft != "旧草稿" || format != "text" {
-		t.Fatalf("migrated row: %q %q %v", draft, format, ok)
+	if _, err := db.Exec(schema + `
+		DROP TABLE pending;
+		CREATE TABLE pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, card TEXT NOT NULL, created INTEGER NOT NULL);
+		INSERT INTO pending VALUES('om_old', '旧草稿', '{}', 1)`); err != nil {
+		t.Fatal(err)
 	}
+	db.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := OpenStore(dir)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer s.Close()
+			if _, format, _, ok := s.PendingGet("om_old"); !ok || format != "text" {
+				t.Errorf("migrated row: format=%q ok=%v", format, ok)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestDigestBuffer(t *testing.T) {
