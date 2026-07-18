@@ -27,20 +27,36 @@ func logf(format string, args ...any) {
 // Message 是过滤管线的统一消息形态。
 // 字段声明顺序即输出 JSON 键序（golden fixtures 字节对齐）；
 // 扫读友好：正文/发送者靠前，ID 类字段收尾（单行截断也能看到重点）。
+// 同会话聚合事件（GroupP0）额外携带 N/Msgs，顶层字段取最后一条作代表，
+// 单条事件两字段缺省、输出与聚合前字节一致。
 type Message struct {
-	P     string   `json:"p,omitempty"`
-	Text  string   `json:"text"`
-	From  *string  `json:"from"`
-	Chat  *string  `json:"chat"`
-	T     string   `json:"t"`
-	Ctype string   `json:"ctype"`
-	Type  string   `json:"type"`
-	Mid   string   `json:"mid"`
-	Cid   string   `json:"cid"`
-	Fid   string   `json:"fid"`
-	Ftype string   `json:"ftype"`
-	Link  string   `json:"link"`
-	AtIDs []string `json:"-"` // mentions 的 open_id 列表；仅供分级判 @我，不进事件 JSON
+	P       string   `json:"p,omitempty"`
+	N       int      `json:"n,omitempty"`       // 聚合条数，仅 ≥2 时出现
+	Msgs    []P0Item `json:"msgs,omitempty"`    // 聚合子条目（时间升序），仅 N≥2 时出现
+	Replied bool     `json:"replied,omitempty"` // 该消息之后本人已在同会话发言（大概率已亲自处理）
+	Text    string   `json:"text"`
+	From    *string  `json:"from"`
+	Chat    *string  `json:"chat"`
+	T       string   `json:"t"`
+	Ctype   string   `json:"ctype"`
+	Type    string   `json:"type"`
+	Mid     string   `json:"mid"`
+	Cid     string   `json:"cid"`
+	Fid     string   `json:"fid"`
+	Ftype   string   `json:"ftype"`
+	Link    string   `json:"link"`
+	AtIDs   []string `json:"-"` // mentions 的 open_id 列表；仅供分级判 @我，不进事件 JSON
+}
+
+// P0Item 是聚合事件的子条目：正文靠前、ID 收尾，键序哲学与 Message 一致。
+// 会话级字段（chat/cid/ctype/link）由顶层承载，不在子条目里重复。
+type P0Item struct {
+	Text string  `json:"text"`
+	From *string `json:"from"`
+	T    string  `json:"t"`
+	Type string  `json:"type"`
+	Mid  string  `json:"mid"`
+	Fid  string  `json:"fid"`
 }
 
 // ChatMeta 是 chat-list 返回的会话元数据（按 active_time 降序）。

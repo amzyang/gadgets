@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -148,19 +149,27 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 	}
 	rules := LoadRulesDir(self, p.Paths.ConfigDir)
 
-	var p0, p1 []Message
+	// p0 = 本 tick 全部 P0（通知批次）；p0Buf = 待聚合发射的 P0（不含音视频会议）；
+	// selfLast = 本批增量里本人发言的每会话最新时间（replied 注记信号源）
+	var p0, p1, p0Buf []Message
+	selfLast := map[string]string{}
 	collect := func(msgs []Message) error {
+		mergeSelfLast(selfLast, SelfLastTimes(msgs, rules.Self))
 		fresh, err := s.FilterNewMessages(rules.ClassifyAll(msgs), nowEpoch, SeenMax())
 		if err != nil {
 			return err
 		}
 		for _, m := range fresh {
-			if m.P == "P0" {
-				p.emit(m)
-				p0 = append(p0, m)
-			} else {
+			switch {
+			case m.P != "P0":
 				p1 = append(p1, m)
+				continue
+			case vcTypes[m.Type]:
+				p.emit(m) // 音视频会议实时性最强：跳过聚合与 replied，拉到即发
+			default:
+				p0Buf = append(p0Buf, m)
 			}
+			p0 = append(p0, m)
 		}
 		return nil
 	}
@@ -245,16 +254,93 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 	}
 	p.tickN++
 
+	// 同会话聚合 + replied 注记后统一发射（音视频会议已在 collect 内即时单发）
+	for _, ev := range MarkReplied(GroupP0(p0Buf), selfLast) {
+		p.emit(ev)
+	}
+
 	if len(p1) > 0 {
 		s.DigestAppend(p1)
 	}
-	// 通知命令：每 tick 的 P0 批次聚合为一次调用（避免弹窗轰炸），异步不阻塞轮询
-	if len(p0) > 0 {
+	// 通知命令：每 tick 的 P0 批次聚合为一次调用（避免弹窗轰炸），异步不阻塞轮询；
+	// 本人已回复的不打扰（音视频会议豁免）
+	if batch := notifyBatch(p0, selfLast); len(batch) > 0 {
 		if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
-			go RunNotify(ctx, script, p0)
+			go RunNotify(ctx, script, batch)
 		}
 	}
 	return nil
+}
+
+// GroupP0 把一个 tick 内的 P0 按会话聚合：同 cid 多条合并为一个事件
+// （Msgs 按时间升序，顶层字段取最后一条作代表——send-card 的回复目标与
+// 幂等键天然指向最新消息），单条保持原形状（N/Msgs 缺省，输出字节不变）。
+// 事件顺序按会话首见顺序稳定输出。音视频会议不进此函数（即时单发）。
+func GroupP0(msgs []Message) []Message {
+	var order []string
+	byCid := map[string][]Message{}
+	for _, m := range msgs {
+		if _, ok := byCid[m.Cid]; !ok {
+			order = append(order, m.Cid)
+		}
+		byCid[m.Cid] = append(byCid[m.Cid], m)
+	}
+	out := make([]Message, 0, len(order))
+	for _, cid := range order {
+		group := byCid[cid]
+		// 同会话可能同时来自逐会话拉取与 search 兜底，先按时间归位
+		sort.SliceStable(group, func(i, j int) bool { return group[i].T < group[j].T })
+		if len(group) == 1 {
+			out = append(out, group[0])
+			continue
+		}
+		rep := group[len(group)-1]
+		rep.N = len(group)
+		rep.Msgs = make([]P0Item, 0, len(group))
+		for _, m := range group {
+			rep.Msgs = append(rep.Msgs, P0Item{
+				Text: m.Text, From: m.From, T: m.T, Type: m.Type, Mid: m.Mid, Fid: m.Fid,
+			})
+		}
+		out = append(out, rep)
+	}
+	return out
+}
+
+// MarkReplied 给「代表时间严格早于本人同会话最新发言」的事件置 replied——
+// 人已亲自处理，模型据此安静跳过。分钟精度下同分钟不标记（宁可多提醒，
+// 不可误标漏消息）；聚合组以最后一条（顶层 T）为准。
+func MarkReplied(events []Message, selfLast map[string]string) []Message {
+	for i := range events {
+		if t := selfLast[events[i].Cid]; t != "" && t > events[i].T {
+			events[i].Replied = true
+		}
+	}
+	return events
+}
+
+// notifyBatch 从通知批次剔除本人已回复的 P0（判据同 MarkReplied）；
+// 音视频会议豁免——加入会议的实时提醒不因本人发言而抑制。
+func notifyBatch(p0 []Message, selfLast map[string]string) []Message {
+	out := make([]Message, 0, len(p0))
+	for _, m := range p0 {
+		if !vcTypes[m.Type] {
+			if t := selfLast[m.Cid]; t != "" && t > m.T {
+				continue
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// mergeSelfLast 把单批提取结果并入 tick 级累积（保留每会话最大时间）。
+func mergeSelfLast(acc, batch map[string]string) {
+	for cid, t := range batch {
+		if t > acc[cid] {
+			acc[cid] = t
+		}
+	}
 }
 
 // markRestricted 持久标记防泄密群；仅首次检测告警（重探失败只刷新时间戳）。

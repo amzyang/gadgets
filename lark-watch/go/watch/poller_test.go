@@ -264,6 +264,163 @@ func TestTickRestrictedReprobe(t *testing.T) {
 	}
 }
 
+// rawVCJSON 构造音视频会议消息（content 为空，msg_type=video_chat）。
+func rawVCJSON(mid, fid, from, t string) string {
+	return fmt.Sprintf(`{"message_id":%q,"chat_id":"oc_a","msg_type":"video_chat","content":"",
+		"create_time":%q,"message_app_link":"https://applink.feishu.cn/client/chat/open?openChatId=oc_a",
+		"sender":{"id":%q,"id_type":"open_id","name":%q,"sender_type":"user"}}`,
+		mid, t, fid, from)
+}
+
+// GroupP0：同 cid 合并（代表取最后一条、Msgs 时间升序），单条原样透传，会话首见序稳定。
+func TestGroupP0(t *testing.T) {
+	from := "张三"
+	mk := func(cid, mid, text, ts string) Message {
+		return Message{P: "P0", Text: text, From: &from, T: ts, Cid: cid, Mid: mid}
+	}
+	a1 := mk("oc_a", "om_1", "在吗", "2026-07-17 12:00")
+	a2 := mk("oc_a", "om_2", "帮我看个问题", "2026-07-17 12:01")
+	b1 := mk("oc_b", "om_3", "另一个会话", "2026-07-17 12:00")
+
+	out := GroupP0([]Message{a2, b1, a1}) // 乱序输入：组内按时间归位
+	if len(out) != 2 {
+		t.Fatalf("want 2 events, got %d", len(out))
+	}
+	g := out[0]
+	if g.N != 2 || g.Mid != "om_2" || g.Text != "帮我看个问题" {
+		t.Errorf("representative should be last by time: %+v", g)
+	}
+	if len(g.Msgs) != 2 || g.Msgs[0].Mid != "om_1" || g.Msgs[1].Mid != "om_2" {
+		t.Errorf("msgs should be time-ascending: %+v", g.Msgs)
+	}
+	if out[1].N != 0 || out[1].Msgs != nil || out[1].Mid != "om_3" {
+		t.Errorf("single message should pass through unchanged: %+v", out[1])
+	}
+}
+
+// SelfLastTimes：每会话取本人最新时间，非本人不计。
+func TestSelfLastTimes(t *testing.T) {
+	msgs := []Message{
+		{Fid: "ou_SELF", Cid: "oc_a", T: "2026-07-17 12:00"},
+		{Fid: "ou_SELF", Cid: "oc_a", T: "2026-07-17 12:05"},
+		{Fid: "ou_alice", Cid: "oc_a", T: "2026-07-17 12:06"},
+		{Fid: "ou_SELF", Cid: "oc_b", T: "2026-07-17 11:00"},
+	}
+	got := SelfLastTimes(msgs, "ou_SELF")
+	if len(got) != 2 || got["oc_a"] != "2026-07-17 12:05" || got["oc_b"] != "2026-07-17 11:00" {
+		t.Errorf("SelfLastTimes = %v", got)
+	}
+	if got := SelfLastTimes(msgs, "ou_nobody"); len(got) != 0 {
+		t.Errorf("want empty map, got %v", got)
+	}
+}
+
+// notifyBatch：本人已回复的剔除；同分钟保留（不误抑制）；音视频会议豁免。
+func TestNotifyBatch(t *testing.T) {
+	selfLast := map[string]string{"oc_a": "2026-07-17 12:01"}
+	batch := notifyBatch([]Message{
+		{Type: "text", Cid: "oc_a", T: "2026-07-17 12:00", Mid: "om_replied"},
+		{Type: "text", Cid: "oc_a", T: "2026-07-17 12:01", Mid: "om_same_minute"},
+		{Type: "video_chat", Cid: "oc_a", T: "2026-07-17 12:00", Mid: "om_vc"},
+		{Type: "text", Cid: "oc_b", T: "2026-07-17 12:00", Mid: "om_other"},
+	}, selfLast)
+	if len(batch) != 3 {
+		t.Fatalf("want 3 kept, got %d: %+v", len(batch), batch)
+	}
+	for _, m := range batch {
+		if m.Mid == "om_replied" {
+			t.Error("replied message should be filtered from notify batch")
+		}
+	}
+}
+
+// 聚合 tick：同会话两条 P0 合并为一个事件，键序与代表字段做字节断言。
+func TestTickAggregatesSameChat(t *testing.T) {
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "在吗", "2026-07-17 12:00"),
+			rawMsgJSON("om_2", "ou_alice", "张三", "帮我看个问题", "2026-07-17 12:01"),
+		)},
+	}
+	p, events := newTestPoller(t, f, 2000)
+	p.Store.SetFetchCursor("oc_a", 1000)
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*events) != 1 {
+		t.Fatalf("want 1 aggregated event, got %d: %q", len(*events), *events)
+	}
+	want := `{"p":"P0","n":2,"msgs":[` +
+		`{"text":"在吗","from":"张三","t":"2026-07-17 12:00","type":"text","mid":"om_1","fid":"ou_alice"},` +
+		`{"text":"帮我看个问题","from":"张三","t":"2026-07-17 12:01","type":"text","mid":"om_2","fid":"ou_alice"}],` +
+		`"text":"帮我看个问题","from":"张三","chat":null,"t":"2026-07-17 12:01","ctype":"p2p","type":"text",` +
+		`"mid":"om_2","cid":"oc_a","fid":"ou_alice","ftype":"user",` +
+		`"link":"lark://applink.feishu.cn/client/chat/open?openChatId=oc_a"}` + "\n"
+	if got := string((*events)[0]); got != want {
+		t.Errorf("aggregated event mismatch:\n got %s\nwant %s", got, want)
+	}
+}
+
+// 音视频会议不聚合：同会话同 tick 里 vc 即时单发，其余文本照常聚合。
+func TestTickVCNotAggregated(t *testing.T) {
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawVCJSON("om_v", "ou_alice", "张三", "2026-07-17 12:00"),
+			rawMsgJSON("om_1", "ou_alice", "张三", "进来聊", "2026-07-17 12:01"),
+			rawMsgJSON("om_2", "ou_alice", "张三", "说个事", "2026-07-17 12:02"),
+		)},
+	}
+	p, events := newTestPoller(t, f, 2000)
+	p.Store.SetFetchCursor("oc_a", 1000)
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*events) != 2 {
+		t.Fatalf("want vc single + aggregated text, got %d: %q", len(*events), *events)
+	}
+	vc, agg := string((*events)[0]), string((*events)[1])
+	if !strings.Contains(vc, `"type":"video_chat"`) || strings.Contains(vc, `"n":`) {
+		t.Errorf("first event should be un-aggregated vc: %s", vc)
+	}
+	if !strings.Contains(agg, `"n":2`) || !strings.Contains(agg, `"mid":"om_2"`) {
+		t.Errorf("texts should aggregate to n=2 with last as representative: %s", agg)
+	}
+}
+
+// replied 注记：本人发言严格晚于 P0（分钟精度）时事件带 replied:true；本人消息本身不成事件。
+func TestTickRepliedAnnotation(t *testing.T) {
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "在吗", "2026-07-17 12:00"),
+			rawMsgJSON("om_2", "ou_SELF", "我", "在的，你说", "2026-07-17 12:01"),
+		)},
+	}
+	p, events := newTestPoller(t, f, 2000)
+	p.Store.SetFetchCursor("oc_a", 1000)
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*events) != 1 {
+		t.Fatalf("want 1 event, got %d: %q", len(*events), *events)
+	}
+	got := string((*events)[0])
+	if !strings.Contains(got, `"p":"P0","replied":true,"text":"在吗"`) {
+		t.Errorf("want replied annotation right after p, got: %s", got)
+	}
+}
+
+// replied 同分钟不标记：宁可多提醒，不可误标。
+func TestMarkRepliedSameMinute(t *testing.T) {
+	events := MarkReplied([]Message{{Cid: "oc_a", T: "2026-07-17 12:00"}},
+		map[string]string{"oc_a": "2026-07-17 12:00"})
+	if events[0].Replied {
+		t.Error("same-minute self reply must not mark replied")
+	}
+}
+
 // 停机夹紧：ClampFetchCursors 把全部游标夹到指定时刻。
 func TestClampFetchCursors(t *testing.T) {
 	s, _ := openTestStore(t)

@@ -134,6 +134,19 @@ func (r Rules) Classify(m Message) (Message, bool) {
 	return m, true
 }
 
+// SelfLastTimes 提取本人消息的每会话最新时间（cid → create_time，
+// minuteLayout 字符串可直接比较）。本人消息随后会被 Classify 当噪音丢弃，
+// 但「我已在该会话发过言」是 replied 注记（MarkReplied）的信号源。
+func SelfLastTimes(msgs []Message, self string) map[string]string {
+	out := map[string]string{}
+	for _, m := range msgs {
+		if m.Fid == self && m.T > out[m.Cid] {
+			out[m.Cid] = m.T
+		}
+	}
+	return out
+}
+
 // ClassifyAll 批量定级，仅保留通过的消息。
 func (r Rules) ClassifyAll(msgs []Message) []Message {
 	out := make([]Message, 0, len(msgs))
