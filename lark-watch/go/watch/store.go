@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS processed (cid TEXT PRIMARY KEY, at INTEGER NOT NULL)
 CREATE TABLE IF NOT EXISTS fetched (cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', extras TEXT NOT NULL DEFAULT '[]', card TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notify_wait (mid TEXT PRIMARY KEY, cid TEXT NOT NULL, msg TEXT NOT NULL, due INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
 `
@@ -352,6 +353,104 @@ func (s *Store) PendingCount() int {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(*) FROM pending`).Scan(&n)
 	return n
+}
+
+// ---------- notify_wait（P0 延迟通知：等草稿卡片发出后展示，超时兜底）----------
+
+// NotifyDeferPut 把通知批次写入延迟队列（mid 冲突忽略——seen 去重后不应重复）。
+func (s *Store) NotifyDeferPut(msgs []Message, due int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, m := range msgs {
+		b, _ := json.Marshal(m)
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO notify_wait(mid, cid, msg, due) VALUES(?, ?, ?, ?)`,
+			m.Mid, m.Cid, string(b), due); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// NotifyDeferTakeDue 取出并删除全部到期条目（同一事务；与 NotifyDeferClaimChat
+// 靠事务互斥，poller 兜底与 send-card 认领不会重复通知同一条）。
+func (s *Store) NotifyDeferTakeDue(now int64) ([]Message, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	out, err := notifyWaitScan(tx.Query(
+		`SELECT msg FROM notify_wait WHERE due <= ? ORDER BY rowid`, now))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.Exec(`DELETE FROM notify_wait WHERE due <= ?`, now); err != nil {
+		return nil, err
+	}
+	return out, tx.Commit()
+}
+
+// NotifyDeferClaimChat 按 mid 认领并删除同会话的全部延迟条目——草稿针对整个
+// 会话的诉求，同 cid 的积压一并释放。查无此 mid（未延迟 / 已超时弹出 / 补课
+// 路径）返回 ok=false，任何一步失败也按未认领处理（条目留待超时兜底，不丢通知）。
+func (s *Store) NotifyDeferClaimChat(mid string) ([]Message, bool) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false
+	}
+	defer tx.Rollback()
+	var cid string
+	if err := tx.QueryRow(`SELECT cid FROM notify_wait WHERE mid = ?`, mid).Scan(&cid); err != nil {
+		return nil, false
+	}
+	out, err := notifyWaitScan(tx.Query(
+		`SELECT msg FROM notify_wait WHERE cid = ? ORDER BY rowid`, cid))
+	if err != nil {
+		return nil, false
+	}
+	if _, err := tx.Exec(`DELETE FROM notify_wait WHERE cid = ?`, cid); err != nil {
+		return nil, false
+	}
+	return out, tx.Commit() == nil
+}
+
+// NotifyDeferPurge 丢弃 due 早于 before 的陈旧条目，返回删除数（启动清理用：
+// 停机太久后重启不弹旧消息，对齐游标夹紧哲学）。
+func (s *Store) NotifyDeferPurge(before int64) int {
+	res, err := s.db.Exec(`DELETE FROM notify_wait WHERE due < ?`, before)
+	if err != nil {
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	return int(n)
+}
+
+// notifyWaitScan 把 notify_wait 查询结果解码为消息列表（插入序即时间序）。
+func notifyWaitScan(rows *sql.Rows, err error) ([]Message, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var m Message
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // ---------- digest_buf（P1 摘要缓冲）----------

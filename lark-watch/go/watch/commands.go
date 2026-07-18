@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -126,9 +127,10 @@ func RunIgnoreAdd(paths Paths, pattern string) error {
 }
 
 // RunSendCard 起草卡片：候选草稿 pending 入库 + 渲染 Card 2.0 模板 + bot 私发给
-// 用户本人。draftPaths 每项为草稿文件路径或 "-"（stdin，至多一项——stdin 只可读
+// 用户本人，随后释放该会话被延迟的 P0 系统通知（通知在草稿生成之后展示）。
+// draftPaths 每项为草稿文件路径或 "-"（stdin，至多一项——stdin 只可读
 // 一次）；format（text|markdown）决定回复消息类型与卡片渲染，应用于全部候选。
-func RunSendCard(s *Store, cli LarkCLI, mid string, draftPaths []string, original, from, scene, t, format string) error {
+func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []string, original, from, scene, t, format string) error {
 	drafts := make([]string, len(draftPaths))
 	for i, path := range draftPaths {
 		var draftBytes []byte
@@ -159,6 +161,13 @@ func RunSendCard(s *Store, cli LarkCLI, mid string, draftPaths []string, origina
 		return fmt.Errorf("send card failed: %w", err)
 	}
 	logf("draft card sent for %s", mid)
+	// 草稿已就绪：认领并展示同会话被延迟的系统通知。查无延迟条目
+	// （已超时弹出 / 未配置通知 / 补课路径）则静默跳过，不会重复弹。
+	if msgs, ok := s.NotifyDeferClaimChat(mid); ok {
+		if script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify")); script != "" {
+			StartNotify(context.Background(), script, msgs)
+		}
+	}
 	return nil
 }
 
