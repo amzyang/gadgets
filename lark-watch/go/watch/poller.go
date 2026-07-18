@@ -153,6 +153,24 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 	// selfLast = 本批增量里本人发言的每会话最新时间（replied 注记信号源）
 	var p0, p1, p0Buf []Message
 	selfLast := map[string]string{}
+	// 任何返回路径（含中途 auth 失败）前先清算缓冲：collect 已把 mid 写入
+	// seen，若不发射即返回，重启后被当重复过滤，消息永久丢失。
+	defer func() {
+		// 同会话聚合 + replied 注记后统一发射（音视频会议已在 collect 内即时单发）
+		for _, ev := range MarkReplied(GroupP0(p0Buf), selfLast) {
+			p.emit(ev)
+		}
+		if len(p1) > 0 {
+			s.DigestAppend(p1)
+		}
+		// 通知命令：每 tick 的 P0 批次聚合为一次调用（避免弹窗轰炸），异步不阻塞轮询；
+		// 本人已回复的不打扰（音视频会议豁免）
+		if batch := notifyBatch(p0, selfLast); len(batch) > 0 {
+			if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
+				go RunNotify(ctx, script, batch)
+			}
+		}
+	}()
 	collect := func(msgs []Message) error {
 		mergeSelfLast(selfLast, SelfLastTimes(msgs, rules.Self))
 		fresh, err := s.FilterNewMessages(rules.ClassifyAll(msgs), nowEpoch, SeenMax())
@@ -253,22 +271,6 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 		}
 	}
 	p.tickN++
-
-	// 同会话聚合 + replied 注记后统一发射（音视频会议已在 collect 内即时单发）
-	for _, ev := range MarkReplied(GroupP0(p0Buf), selfLast) {
-		p.emit(ev)
-	}
-
-	if len(p1) > 0 {
-		s.DigestAppend(p1)
-	}
-	// 通知命令：每 tick 的 P0 批次聚合为一次调用（避免弹窗轰炸），异步不阻塞轮询；
-	// 本人已回复的不打扰（音视频会议豁免）
-	if batch := notifyBatch(p0, selfLast); len(batch) > 0 {
-		if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
-			go RunNotify(ctx, script, batch)
-		}
-	}
 	return nil
 }
 
@@ -307,27 +309,32 @@ func GroupP0(msgs []Message) []Message {
 	return out
 }
 
-// MarkReplied 给「代表时间严格早于本人同会话最新发言」的事件置 replied——
-// 人已亲自处理，模型据此安静跳过。分钟精度下同分钟不标记（宁可多提醒，
-// 不可误标漏消息）；聚合组以最后一条（顶层 T）为准。
+// selfRepliedAfter 是「本人已回复」的唯一判据：本人同会话最新发言严格晚于
+// 该消息（分钟精度下同分钟不算——宁可多提醒，不可误标漏消息）。
+// MarkReplied（事件注记）与 notifyBatch（通知抑制）共用，两侧行为不分叉。
+func selfRepliedAfter(selfLast map[string]string, cid, t string) bool {
+	last := selfLast[cid]
+	return last != "" && last > t
+}
+
+// MarkReplied 给本人已回复的事件置 replied——人已亲自处理，模型据此安静
+// 跳过。聚合组以最后一条（顶层 T）为准。
 func MarkReplied(events []Message, selfLast map[string]string) []Message {
 	for i := range events {
-		if t := selfLast[events[i].Cid]; t != "" && t > events[i].T {
+		if selfRepliedAfter(selfLast, events[i].Cid, events[i].T) {
 			events[i].Replied = true
 		}
 	}
 	return events
 }
 
-// notifyBatch 从通知批次剔除本人已回复的 P0（判据同 MarkReplied）；
-// 音视频会议豁免——加入会议的实时提醒不因本人发言而抑制。
+// notifyBatch 从通知批次剔除本人已回复的 P0；音视频会议豁免——
+// 加入会议的实时提醒不因本人发言而抑制。
 func notifyBatch(p0 []Message, selfLast map[string]string) []Message {
 	out := make([]Message, 0, len(p0))
 	for _, m := range p0 {
-		if !vcTypes[m.Type] {
-			if t := selfLast[m.Cid]; t != "" && t > m.T {
-				continue
-			}
+		if !vcTypes[m.Type] && selfRepliedAfter(selfLast, m.Cid, m.T) {
+			continue
 		}
 		out = append(out, m)
 	}

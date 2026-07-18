@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -409,6 +410,30 @@ func TestTickRepliedAnnotation(t *testing.T) {
 	got := string((*events)[0])
 	if !strings.Contains(got, `"p":"P0","replied":true,"text":"在吗"`) {
 		t.Errorf("want replied annotation right after p, got: %s", got)
+	}
+}
+
+// tick 中途 auth 失败不得吞掉已缓冲的 P0：collect 已把 mid 写入 seen，
+// 提前返回若不先发射，重启后被当重复过滤，消息永久丢失。
+func TestTickAuthErrorFlushesBufferedP0(t *testing.T) {
+	f := &listFake{
+		chats: []ChatMeta{
+			{Cid: "oc_a", Name: "张三", Mode: "p2p"},
+			{Cid: "oc_b", Name: "李四", Mode: "p2p"},
+		},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "在吗", "2026-07-17 12:00"),
+		)},
+		errs: map[string]error{"oc_b": errors.New("NeedUserAuthorization")},
+	}
+	p, events := newTestPoller(t, f, 2000)
+	p.Store.SetFetchCursor("oc_a", 1000)
+	p.Store.SetFetchCursor("oc_b", 1000)
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); !IsAuthError(err) {
+		t.Fatalf("want auth error, got %v", err)
+	}
+	if len(*events) != 1 || !strings.Contains(string((*events)[0]), `"mid":"om_1"`) {
+		t.Fatalf("buffered P0 must flush before auth return, got %q", *events)
 	}
 }
 
