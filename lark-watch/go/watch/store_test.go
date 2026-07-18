@@ -2,27 +2,27 @@ package watch
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 )
 
-func openTestStore(t *testing.T) (*Store, string) {
+func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	dir := t.TempDir()
-	s, err := OpenStore(dir)
+	s, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return s, dir
+	return s
 }
 
 func msg(mid string) Message { return Message{Mid: mid} }
 
 func TestSeenFilterAndCap(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	batch := []Message{msg("m1"), msg("m2")}
 	fresh, err := s.FilterNewMessages(batch, 100, 5)
 	if err != nil {
@@ -44,7 +44,7 @@ func TestSeenFilterAndCap(t *testing.T) {
 }
 
 func TestHandledDedup(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	dup, err := s.HandledSeen("e1", 100, 1000)
 	if err != nil || dup {
 		t.Fatalf("first: dup=%v err=%v", dup, err)
@@ -56,7 +56,7 @@ func TestHandledDedup(t *testing.T) {
 }
 
 func TestProcessedUpsertAndCursors(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	s.MarkProcessed([]string{"oc_a"}, 1000)
 	s.MarkProcessed([]string{"oc_a", "oc_b"}, 2000)
 	cur, err := s.ProcessedCursors()
@@ -69,7 +69,7 @@ func TestProcessedUpsertAndCursors(t *testing.T) {
 }
 
 func TestFetchedCursors(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	if _, ok := s.FetchCursor("oc_a"); ok {
 		t.Fatal("empty store should have no cursor")
 	}
@@ -85,11 +85,17 @@ func TestFetchedCursors(t *testing.T) {
 }
 
 func TestPendingLifecycle(t *testing.T) {
-	s, _ := openTestStore(t)
-	s.PendingPut("om_1", "草稿", "markdown", `{"schema":"2.0"}`, 100)
-	draft, format, card, ok := s.PendingGet("om_1")
-	if !ok || draft != "草稿" || format != "markdown" || card != `{"schema":"2.0"}` {
-		t.Fatalf("get: %q %q %q %v", draft, format, card, ok)
+	s := openTestStore(t)
+	s.PendingPut("om_1", []string{"草稿"}, "markdown", `{"schema":"2.0"}`, 100)
+	drafts, format, card, ok := s.PendingGet("om_1")
+	if !ok || len(drafts) != 1 || drafts[0] != "草稿" || format != "markdown" || card != `{"schema":"2.0"}` {
+		t.Fatalf("get: %q %q %q %v", drafts, format, card, ok)
+	}
+	// 多候选往返（同 mid upsert 覆盖）
+	s.PendingPut("om_1", []string{"候选A", "候选B", "候选C"}, "text", `{}`, 200)
+	drafts, format, _, ok = s.PendingGet("om_1")
+	if !ok || format != "text" || len(drafts) != 3 || drafts[0] != "候选A" || drafts[2] != "候选C" {
+		t.Fatalf("multi get: %q %q %v", drafts, format, ok)
 	}
 	if s.PendingCount() != 1 {
 		t.Fatal("count != 1")
@@ -100,8 +106,8 @@ func TestPendingLifecycle(t *testing.T) {
 	}
 }
 
-// 旧库（pending 无 format 列）打开时补列并落 user_version，存量行按 text 读出；
-// 二次打开走「版本已最新」快速路径。
+// v0 旧库（pending 无 format/extras 列）打开时连跳两级补列并落 user_version，
+// 存量行按 text/单候选读出；二次打开走「版本已最新」快速路径。
 func TestPendingFormatMigration(t *testing.T) {
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "lark-watch.db"))
@@ -119,9 +125,9 @@ func TestPendingFormatMigration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open #%d: %v", i, err)
 		}
-		draft, format, _, ok := s.PendingGet("om_old")
-		if !ok || draft != "旧草稿" || format != "text" {
-			t.Fatalf("migrated row: %q %q %v", draft, format, ok)
+		drafts, format, _, ok := s.PendingGet("om_old")
+		if !ok || len(drafts) != 1 || drafts[0] != "旧草稿" || format != "text" {
+			t.Fatalf("migrated row: %q %q %v", drafts, format, ok)
 		}
 		var v int
 		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
@@ -131,13 +137,97 @@ func TestPendingFormatMigration(t *testing.T) {
 	}
 }
 
+// v1 库（有 format 列、user_version=1）补 extras 列升 v2，存量行读出为单候选。
+func TestPendingExtrasMigration(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "lark-watch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', card TEXT NOT NULL, created INTEGER NOT NULL);
+		INSERT INTO pending VALUES('om_old', '旧草稿', 'markdown', '{}', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	drafts, format, _, ok := s.PendingGet("om_old")
+	if !ok || len(drafts) != 1 || drafts[0] != "旧草稿" || format != "markdown" {
+		t.Fatalf("migrated row: %q %q %v", drafts, format, ok)
+	}
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
+		t.Fatalf("user_version = %d (err=%v), want %d", v, err, len(migrations))
+	}
+}
+
+// 版本号被无守卫的历史二进制回写降级后（列结构其实已最新），按列结构校准版本，
+// 不重跑 ALTER（否则 duplicate column 永久打不开库）。
+func TestMigrateRecalibratesFromColumns(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.PendingPut("om_1", []string{"候选A", "候选B"}, "text", "{}", 1)
+	if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = OpenStore(dir)
+	if err != nil {
+		t.Fatalf("reopen after downgraded version: %v", err)
+	}
+	defer s.Close()
+	if drafts, _, _, ok := s.PendingGet("om_1"); !ok || len(drafts) != 2 {
+		t.Fatalf("row lost after recalibration: %q %v", drafts, ok)
+	}
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
+		t.Fatalf("user_version = %d (err=%v), want %d", v, err, len(migrations))
+	}
+}
+
+// 旧二进制打开更新版本的库（user_version 超前）：不跑迁移、不回写版本号——
+// 回写降级会让新二进制重跑已完成的 ALTER 而永久打不开库。
+func TestMigrateNoDowngrade(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := len(migrations) + 1
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, future)); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != future {
+		t.Fatalf("user_version = %d (err=%v), want %d（超前版本号不得回写降级）", v, err, future)
+	}
+}
+
 // 全新库建表即最新结构，migrate 应直落 len(migrations) 而不执行迁移循环——
 // 追加伪 migration（非法 SQL）后全新 OpenStore 仍成功，即证循环未跑。
 func TestFreshStoreSkipsMigrations(t *testing.T) {
-	migrations = append(migrations, `THIS IS NOT SQL`)
+	migrations = append(migrations, struct{ sql, col string }{`THIS IS NOT SQL`, "no_such_column"})
 	defer func() { migrations = migrations[:len(migrations)-1] }()
 
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	var v int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
 		t.Fatalf("user_version = %d (err=%v), want %d", v, err, len(migrations))
@@ -182,7 +272,7 @@ func TestOpenStoreConcurrent(t *testing.T) {
 }
 
 func TestDigestBuffer(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	chat := "群"
 	s.DigestAppend([]Message{{P: "P1", Mid: "m1", Cid: "oc_x", Chat: &chat, Text: "hi", T: "2026-07-17 12:00"}})
 	if s.DigestCount() != 1 {
@@ -198,7 +288,7 @@ func TestDigestBuffer(t *testing.T) {
 }
 
 func TestCatchupLast(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	s.CatchupLastSet([]string{"oc_x", "oc_y"})
 	s.CatchupLastSet([]string{"oc_z"})
 	cids, _ := s.CatchupLastGet()
@@ -237,8 +327,8 @@ func TestLegacyMigration(t *testing.T) {
 	if dup, _ := s.HandledSeen("e1", 1, 100); !dup {
 		t.Fatal("handled e1 should be imported")
 	}
-	if draft, format, _, ok := s.PendingGet("om_1"); !ok || draft != "旧草稿\n" || format != "text" {
-		t.Fatalf("pending: %q %q %v", draft, format, ok)
+	if drafts, format, _, ok := s.PendingGet("om_1"); !ok || len(drafts) != 1 || drafts[0] != "旧草稿\n" || format != "text" {
+		t.Fatalf("pending: %q %q %v", drafts, format, ok)
 	}
 	if cids, _ := s.CatchupLastGet(); len(cids) != 1 || cids[0] != "oc_a" {
 		t.Fatalf("catchup_last: %v", cids)
@@ -279,21 +369,21 @@ func TestConcurrentAccess(t *testing.T) {
 				}
 			}
 		}(i)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				if err := s2.MarkProcessed([]string{"oc_x"}, int64(j)); err != nil {
 					t.Errorf("mark write: %v", err)
 				}
 			}
-		}(i)
+		}()
 	}
 	wg.Wait()
 }
 
 // restricted 标记：Set/Get/Clear/List 往返，Set 幂等刷新时间戳。
 func TestRestrictedMarker(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	if _, ok := s.RestrictedGet("oc_a"); ok {
 		t.Fatal("empty store: want no marker")
 	}

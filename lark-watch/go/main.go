@@ -8,11 +8,18 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"lark-watch/watch"
 )
+
+// multiFlag 收集可重复出现的 flag 值（send-card 的多候选 --draft）。
+type multiFlag []string
+
+func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func main() {
 	if len(os.Args) < 2 {
@@ -113,22 +120,23 @@ func dispatch(cmd string, args []string) error {
 	case "send-card":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 		mid := fs.String("mid", "", "原消息 message_id")
-		draft := fs.String("draft", "", "草稿文件路径（- 为 stdin）")
+		var drafts multiFlag
+		fs.Var(&drafts, "draft", "草稿文件路径（- 为 stdin；可重复给出多候选）")
 		original := fs.String("original", "", "原消息文本")
 		from := fs.String("from", "", "发送者名")
 		scene := fs.String("scene", "", "私聊或群名")
 		t := fs.String("t", "", "消息时间")
 		format := fs.String("format", "text", "草稿格式：text | markdown（markdown 以 post 富文本回复）")
 		fs.Parse(args)
-		if *mid == "" || *draft == "" || (*format != "text" && *format != "markdown") {
-			return fmt.Errorf("usage: lark-watch send-card --mid <mid> --draft <file|-> [--format text|markdown] [--original <text>] [--from <name>] [--scene <私聊|群名>] [--t <time>]")
+		if *mid == "" || len(drafts) == 0 || (*format != "text" && *format != "markdown") {
+			return fmt.Errorf("usage: lark-watch send-card --mid <mid> --draft <file|-> [--draft <file>]... [--format text|markdown] [--original <text>] [--from <name>] [--scene <私聊|群名>] [--t <time>]")
 		}
 		s, err := openStore()
 		if err != nil {
 			return err
 		}
 		defer s.Close()
-		return watch.RunSendCard(s, cli, *mid, *draft, *original, *from, *scene, *t, *format)
+		return watch.RunSendCard(s, cli, *mid, drafts, *original, *from, *scene, *t, *format)
 
 	case "notify":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)

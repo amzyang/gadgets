@@ -17,7 +17,7 @@ type authFake struct {
 func (f *authFake) AuthSelf() (AuthInfo, error) { return f.info, f.err }
 
 func TestBuildStatusAuthOK(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	now := time.Unix(1_700_000_000, 0)
 	cli := &authFake{info: AuthInfo{OpenID: "ou_x", RefreshExpiresAt: now.Add(48 * time.Hour)}}
 
@@ -34,7 +34,7 @@ func TestBuildStatusAuthOK(t *testing.T) {
 }
 
 func TestBuildStatusAuthExpiring(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	now := time.Unix(1_700_000_000, 0)
 	cli := &authFake{info: AuthInfo{OpenID: "ou_x", RefreshExpiresAt: now.Add(2 * time.Hour)}}
 
@@ -48,7 +48,7 @@ func TestBuildStatusAuthExpiring(t *testing.T) {
 }
 
 func TestBuildStatusRestricted(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	s.RestrictedSet("oc_r", "产品技术部", 1000)
 
 	st := buildStatus(s, &authFake{info: AuthInfo{OpenID: "ou_x"}}, time.Unix(2000, 0))
@@ -62,7 +62,7 @@ func TestBuildStatusRestricted(t *testing.T) {
 }
 
 func TestBuildStatusAuthFailed(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	cli := &authFake{err: errors.New("token expired")}
 
 	st := buildStatus(s, cli, time.Unix(1_700_000_000, 0))

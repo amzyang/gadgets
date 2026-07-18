@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS seen (mid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS handled (event_id TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS processed (cid TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fetched (cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', card TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', extras TEXT NOT NULL DEFAULT '[]', card TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
@@ -65,10 +65,17 @@ func OpenStore(stateDir string) (*Store, error) {
 // migrations 按序演进已有表结构：migrations[i] 把 PRAGMA user_version 从 i 升到
 // i+1，由 migrate 保证只执行一次。加列时在此追加一条 ALTER，并同步 schema 常量
 // （全新库建表即最新结构，由 OpenStore 的 fresh 探测直落最新版本号，不经此循环）。
-var migrations = []string{
+// col 是该迁移给 pending 新增的列名，作为「已完成」的结构探针供版本校准使用。
+var migrations = []struct {
+	sql string
+	col string
+}{
 	// v1: pending.format。曾以 try-ALTER 方式发布（未写版本号），存量库可能已有
-	// 该列，靠 bootstrap 探测跳过。
-	`ALTER TABLE pending ADD COLUMN format TEXT NOT NULL DEFAULT 'text'`,
+	// 该列，靠版本校准跳过。
+	{`ALTER TABLE pending ADD COLUMN format TEXT NOT NULL DEFAULT 'text'`, "format"},
+	// v2: 多候选草稿。draft 保留候选 0 原文（版本偏斜期旧二进制读到的仍是合法
+	// 草稿），extras 存候选 1..n-1 的 JSON 数组。
+	{`ALTER TABLE pending ADD COLUMN extras TEXT NOT NULL DEFAULT '[]'`, "extras"},
 }
 
 // migrate 把落后的库补到最新版本；fresh（本次全新建库）只落版本号不跑迁移。
@@ -80,8 +87,8 @@ func migrate(db *sql.DB, fresh bool) error {
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v == len(migrations) {
-		return nil
+	if v >= len(migrations) {
+		return nil // 版本超前 = 更新的二进制迁移过，绝不能回写降级
 	}
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
@@ -96,25 +103,31 @@ func migrate(db *sql.DB, fresh bool) error {
 	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v == len(migrations) {
+	if v >= len(migrations) {
 		return nil // 并发者已完成迁移
 	}
 	if fresh {
 		v = len(migrations) // 建表即最新结构，无迁移可跑
-	} else if v == 0 {
-		// bootstrap：未写过版本号的存量库按实际结构定位版本——try-ALTER 时期
-		// 的库已有 format 列，即 v1 结构。
-		var n int
-		if err := conn.QueryRowContext(ctx,
-			`SELECT count(*) FROM pragma_table_info('pending') WHERE name = 'format'`).Scan(&n); err != nil {
-			return err
-		}
-		if n > 0 {
-			v = 1
+	} else {
+		// 版本校准：按实际列结构定位版本下界——覆盖 v1 try-ALTER 发布期（未写
+		// 版本号），以及无 >= 守卫的历史二进制打开新库时把版本号回写降级的情形；
+		// 列已存在即视为对应迁移已完成，避免重跑 ALTER 报 duplicate column。
+		for i, m := range migrations {
+			if v > i {
+				continue
+			}
+			var n int
+			if err := conn.QueryRowContext(ctx,
+				`SELECT count(*) FROM pragma_table_info('pending') WHERE name = ?`, m.col).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				v = i + 1
+			}
 		}
 	}
 	for ; v < len(migrations); v++ {
-		if _, err := conn.ExecContext(ctx, migrations[v]); err != nil {
+		if _, err := conn.ExecContext(ctx, migrations[v].sql); err != nil {
 			return fmt.Errorf("migration %d: %w", v+1, err)
 		}
 	}
@@ -306,19 +319,28 @@ func (s *Store) RestrictedList() ([]RestrictedChat, error) {
 	return out, rows.Err()
 }
 
-// ---------- pending（卡片草稿+卡片原稿）----------
+// ---------- pending（卡片草稿候选+卡片原稿）----------
 
-func (s *Store) PendingPut(mid, draft, format, card string, now int64) error {
+// PendingPut 落盘草稿候选（len(drafts) >= 1 由调用方保证）：候选 0 进 draft 列，
+// 其余进 extras（JSON 数组）。
+func (s *Store) PendingPut(mid string, drafts []string, format, card string, now int64) error {
+	extras, _ := json.Marshal(drafts[1:])
 	_, err := s.db.Exec(
-		`INSERT INTO pending(mid, draft, format, card, created) VALUES(?, ?, ?, ?, ?)
-		 ON CONFLICT(mid) DO UPDATE SET draft = excluded.draft, format = excluded.format, card = excluded.card, created = excluded.created`,
-		mid, draft, format, card, now)
+		`INSERT INTO pending(mid, draft, format, extras, card, created) VALUES(?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(mid) DO UPDATE SET draft = excluded.draft, format = excluded.format, extras = excluded.extras, card = excluded.card, created = excluded.created`,
+		mid, drafts[0], format, string(extras), card, now)
 	return err
 }
 
-func (s *Store) PendingGet(mid string) (draft, format, card string, ok bool) {
-	err := s.db.QueryRow(`SELECT draft, format, card FROM pending WHERE mid = ?`, mid).Scan(&draft, &format, &card)
-	return draft, format, card, err == nil
+func (s *Store) PendingGet(mid string) (drafts []string, format, card string, ok bool) {
+	var draft, extras string
+	if err := s.db.QueryRow(`SELECT draft, format, extras, card FROM pending WHERE mid = ?`, mid).
+		Scan(&draft, &format, &extras, &card); err != nil {
+		return nil, "", "", false
+	}
+	var rest []string
+	json.Unmarshal([]byte(extras), &rest) // DEFAULT '[]' 保证可解码
+	return append([]string{draft}, rest...), format, card, true
 }
 
 func (s *Store) PendingDelete(mid string) error {
@@ -489,7 +511,7 @@ func (s *Store) migrateLegacy(stateDir string) {
 			continue
 		}
 		card, _ := os.ReadFile(filepath.Join(pendingDir, mid+".card.json"))
-		s.PendingPut(mid, string(draft), "text", string(card), 0)
+		s.PendingPut(mid, []string{string(draft)}, "text", string(card), 0)
 	}
 	os.Rename(pendingDir, pendingDir+".imported")
 	logf("migrated legacy pending/ into sqlite")

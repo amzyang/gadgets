@@ -56,7 +56,7 @@ func chatMsgsResp(hasMore bool, msgs ...string) string {
 
 func newTestPoller(t *testing.T, cli LarkCLI, now int64) (*Poller, *[][]byte) {
 	t.Helper()
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	var events [][]byte
 	p := &Poller{
 		Store: s, CLI: cli, Paths: Paths{ConfigDir: t.TempDir()},
@@ -448,7 +448,7 @@ func TestMarkRepliedSameMinute(t *testing.T) {
 
 // 停机夹紧：ClampFetchCursors 把全部游标夹到指定时刻。
 func TestClampFetchCursors(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	s.SetFetchCursor("oc_a", 1000)
 	s.SetFetchCursor("oc_b", 2000)
 	s.ClampFetchCursors(5000)

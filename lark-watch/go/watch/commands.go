@@ -125,30 +125,34 @@ func RunIgnoreAdd(paths Paths, pattern string) error {
 	return nil
 }
 
-// RunSendCard 起草卡片：pending 入库 + 渲染 Card 2.0 模板 + bot 私发给用户本人。
-// draftPath 为 "-" 时从 stdin 读草稿；format（text|markdown）决定回复消息类型与卡片渲染。
-func RunSendCard(s *Store, cli LarkCLI, mid, draftPath, original, from, scene, t, format string) error {
-	var draftBytes []byte
-	var err error
-	if draftPath == "-" {
-		draftBytes, err = io.ReadAll(os.Stdin)
-	} else {
-		draftBytes, err = os.ReadFile(draftPath)
-	}
-	if err != nil {
-		return err
-	}
-	draft := strings.TrimRight(string(draftBytes), "\n")
-	if draft == "" {
-		return fmt.Errorf("draft is empty")
+// RunSendCard 起草卡片：候选草稿 pending 入库 + 渲染 Card 2.0 模板 + bot 私发给
+// 用户本人。draftPaths 每项为草稿文件路径或 "-"（stdin，至多一项——stdin 只可读
+// 一次）；format（text|markdown）决定回复消息类型与卡片渲染，应用于全部候选。
+func RunSendCard(s *Store, cli LarkCLI, mid string, draftPaths []string, original, from, scene, t, format string) error {
+	drafts := make([]string, len(draftPaths))
+	for i, path := range draftPaths {
+		var draftBytes []byte
+		var err error
+		if path == "-" {
+			draftBytes, err = io.ReadAll(os.Stdin)
+		} else {
+			draftBytes, err = os.ReadFile(path)
+		}
+		if err != nil {
+			return err
+		}
+		drafts[i] = strings.TrimRight(string(draftBytes), "\n")
+		if drafts[i] == "" {
+			return fmt.Errorf("draft %d is empty", i+1)
+		}
 	}
 
 	self, err := cli.AuthSelf()
 	if err != nil {
 		return err
 	}
-	card := RenderDraftCard(mid, scene, from, t, original, draft, format)
-	if err := s.PendingPut(mid, draft, format, card, time.Now().Unix()); err != nil {
+	card := RenderDraftCard(mid, scene, from, t, original, drafts, format)
+	if err := s.PendingPut(mid, drafts, format, card, time.Now().Unix()); err != nil {
 		return err
 	}
 	if err := cli.SendCardToUser(self.OpenID, card); err != nil {

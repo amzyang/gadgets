@@ -72,10 +72,17 @@ func cardEvent(eventID, token, action, mid string) []byte {
 		eventID, token, action, mid))
 }
 
+// cardEventIdx 构造带候选索引的回调事件（多候选卡片的发送按钮）。
+func cardEventIdx(eventID, token, action, mid string, idx int) []byte {
+	return []byte(fmt.Sprintf(
+		`{"event_id":%q,"action_tag":"button","token":%q,"action_value":"{\"action\":\"%s\",\"mid\":\"%s\",\"idx\":%d}"}`,
+		eventID, token, action, mid, idx))
+}
+
 func TestCardSend(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_t1", "测试草稿", "text", testCardContent, 1)
+	s.PendingPut("om_t1", []string{"测试草稿"}, "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e1", "tok1", "send", "om_t1"), 100)
 
@@ -103,10 +110,10 @@ func TestCardSend(t *testing.T) {
 }
 
 func TestCardSendUsesLocalCardSource(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	cli := &fakeCLI{}
 	local := `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"LOCAL_CARD_MARKER"},{"tag":"button"}]}}`
-	s.PendingPut("om_t6", "草稿6", "text", local, 1)
+	s.PendingPut("om_t6", []string{"草稿6"}, "text", local, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e6", "tok6", "send", "om_t6"), 100)
 
@@ -117,9 +124,9 @@ func TestCardSendUsesLocalCardSource(t *testing.T) {
 
 // markdown 草稿：落盘 format 原样透传给回复发送。
 func TestCardSendMarkdownFormat(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_t7", "```go\nx\n```", "markdown", testCardContent, 1)
+	s.PendingPut("om_t7", []string{"```go\nx\n```"}, "markdown", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e7", "tok7", "send", "om_t7"), 100)
 
@@ -128,10 +135,71 @@ func TestCardSendMarkdownFormat(t *testing.T) {
 	}
 }
 
-func TestCardIgnore(t *testing.T) {
-	s, _ := openTestStore(t)
+// 多候选：按 idx 发送对应候选，done 卡只保留所选候选块。
+func TestCardSendCandidate(t *testing.T) {
+	s := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_t2", "草稿2", "text", testCardContent, 1)
+	card := RenderDraftCard("om_c", "私聊", "张三", "", "原消息", []string{"候选A", "候选B"}, "text")
+	s.PendingPut("om_c", []string{"候选A", "候选B"}, "text", card, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEventIdx("e10", "tok10", "send", "om_c", 1), 100)
+
+	if !cli.hasCall("reply om_c 候选B format=text") {
+		t.Errorf("should reply candidate B: %v", cli.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_c"); ok {
+		t.Error("pending should be deleted after send")
+	}
+	for _, c := range cli.calls {
+		if strings.HasPrefix(c, "update-card") && (strings.Contains(c, "候选A") || !strings.Contains(c, "候选B")) {
+			t.Errorf("done card should keep only chosen candidate: %s", c)
+		}
+	}
+}
+
+// idx 越界（同 mid 重发覆盖 pending 后旧卡点了消失的候选）：不发送、改卡已失效、
+// pending 保留（与 stale 语义一致，用户回终端处理）。
+func TestCardSendIdxOutOfRange(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_o", []string{"唯一候选"}, "text", testCardContent, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEventIdx("e11", "tok11", "send", "om_o", 5), 100)
+
+	if cli.hasCall("reply") {
+		t.Errorf("should not reply out-of-range candidate: %v", cli.calls)
+	}
+	if !cli.hasCall("已失效") {
+		t.Errorf("should update stale status: %v", cli.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_o"); !ok {
+		t.Error("pending should be kept")
+	}
+}
+
+// 多候选复制：bot 逐条回发全部候选（每条可单独长按复制），pending 保留、不改卡。
+func TestCardCopyMulti(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_cm", []string{"候选甲", "候选乙"}, "text", testCardContent, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e12", "tok12", "copy", "om_cm"), 100)
+
+	if !cli.hasCall("send-text ou_SELF 候选甲") || !cli.hasCall("send-text ou_SELF 候选乙") {
+		t.Errorf("copy should send every candidate: %v", cli.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_cm"); !ok {
+		t.Error("pending should be kept after copy")
+	}
+	if cli.hasCall("update-card") {
+		t.Errorf("copy should not update card: %v", cli.calls)
+	}
+}
+
+func TestCardIgnore(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_t2", []string{"草稿2"}, "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e2", "tok2", "ignore", "om_t2"), 100)
 
@@ -144,9 +212,9 @@ func TestCardIgnore(t *testing.T) {
 }
 
 func TestCardCopy(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_t3", "草稿3", "text", testCardContent, 1)
+	s.PendingPut("om_t3", []string{"草稿3"}, "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e3", "tok3", "copy", "om_t3"), 100)
 
@@ -162,7 +230,7 @@ func TestCardCopy(t *testing.T) {
 }
 
 func TestCardSendMissingPending(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	cli := &fakeCLI{}
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e4", "tok4", "send", "om_none"), 100)
@@ -176,9 +244,9 @@ func TestCardSendMissingPending(t *testing.T) {
 }
 
 func TestCardSendFailureKeepsPending(t *testing.T) {
-	s, _ := openTestStore(t)
+	s := openTestStore(t)
 	cli := &fakeCLI{failReply: true}
-	s.PendingPut("om_t5", "草稿5", "text", testCardContent, 1)
+	s.PendingPut("om_t5", []string{"草稿5"}, "text", testCardContent, 1)
 
 	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e5", "tok5", "send", "om_t5"), 100)
 
@@ -192,14 +260,14 @@ func TestCardSendFailureKeepsPending(t *testing.T) {
 
 func TestRenderDraftCard(t *testing.T) {
 	card := RenderDraftCard("om_x", "私聊", "张三", "12:03",
-		`<at user_id="ou_1">邹洋</at> 帮我看下 *这个* <方案>`, "好的，```稍后```回复", "text")
+		`<at user_id="ou_1">邹洋</at> 帮我看下 *这个* <方案>`, []string{"好的，```稍后```回复"}, "text")
 
 	for _, want := range []string{
 		`"schema":"2.0"`,
 		"@邹洋 帮我看下 &#42;这个&#42; &#60;方案&#62;", // at 转 @名字 + 特殊字符转义
 		"**草稿**\\n\\n```\\n",                 // 代码围栏前空行
 		"'''稍后'''",                           // 草稿内围栏降级
-		`"action":"send","mid":"om_x"`,
+		`"action":"send","idx":0,"mid":"om_x"`,
 		`"action":"copy"`,
 		`"action":"ignore"`,
 	} {
@@ -210,15 +278,81 @@ func TestRenderDraftCard(t *testing.T) {
 	if strings.Contains(card, "confirm") {
 		t.Error("send button must not have confirm popup")
 	}
+	// 单候选保持单草稿文案（不出现圈号）
+	if strings.Contains(card, "草稿 ①") || strings.Contains(card, "发送 ①") {
+		t.Errorf("single draft should not use circled labels: %s", card)
+	}
+}
+
+// 多候选：每条候选块带圈号标题与自己的发送按钮（就近排列），底部共享复制/忽略。
+func TestRenderDraftCardMulti(t *testing.T) {
+	card := RenderDraftCard("om_m", "私聊", "张三", "", "原消息",
+		[]string{"先答应", "先问细节", "婉拒"}, "text")
+
+	// 元素顺序：草稿① < 发送① < 草稿② < 发送② < 草稿③ < 发送③ < 复制 < 忽略
+	var last int
+	for _, marker := range []string{
+		"**草稿 ①**", `"action":"send","idx":0,"mid":"om_m"`,
+		"**草稿 ②**", `"action":"send","idx":1,"mid":"om_m"`,
+		"**草稿 ③**", `"action":"send","idx":2,"mid":"om_m"`,
+		"复制草稿", "忽略",
+	} {
+		i := strings.Index(card, marker)
+		if i < 0 {
+			t.Fatalf("card missing %q\n%s", marker, card)
+		}
+		if i < last {
+			t.Fatalf("element %q out of order\n%s", marker, card)
+		}
+		last = i
+	}
+	for _, want := range []string{
+		`"element_id":"draft-0"`, `"element_id":"draft-1"`, `"element_id":"draft-2"`,
+		"发送 ①", "发送 ②", "发送 ③",
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+	if strings.Count(card, `"action":"copy"`) != 1 || strings.Count(card, `"action":"ignore"`) != 1 {
+		t.Errorf("copy/ignore should appear once each: %s", card)
+	}
+}
+
+// 多候选 text 格式：每条候选独立包围栏、独立降级内部围栏。
+func TestRenderDraftCardMultiText(t *testing.T) {
+	card := RenderDraftCard("om_mt", "", "", "", "", []string{"甲```x```", "乙"}, "text")
+	for _, want := range []string{"'''x'''", "**草稿 ①**\\n\\n```\\n", "**草稿 ②**\\n\\n```\\n乙\\n```"} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+}
+
+// 多候选 markdown 格式：每条候选独立走围栏补空行，不降级。
+func TestRenderDraftCardMultiMarkdown(t *testing.T) {
+	card := RenderDraftCard("om_mm", "", "", "", "",
+		[]string{"看这段：\n```go\nx := 1\n```", "直接说结论"}, "markdown")
+	for _, want := range []string{
+		"**草稿 ①**\\n\\n看这段：\\n\\n```go\\nx := 1\\n```",
+		"**草稿 ②**\\n\\n直接说结论",
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+	if strings.Contains(card, "'''") {
+		t.Errorf("markdown drafts should keep fences: %s", card)
+	}
 }
 
 // markdown 草稿：直接按 markdown 渲染（不包围栏、不降级 ```），围栏前补空行。
 func TestRenderDraftCardMarkdown(t *testing.T) {
-	card := RenderDraftCard("om_md", "", "", "", "", "看这段：\n```go\nx := 1\n```\n跑一下", "markdown")
+	card := RenderDraftCard("om_md", "", "", "", "", []string{"看这段：\n```go\nx := 1\n```\n跑一下"}, "markdown")
 
 	for _, want := range []string{
 		"**草稿**\\n\\n看这段：\\n\\n```go\\nx := 1\\n```\\n跑一下", // 卡片方言：围栏前补空行
-		`"action":"send","mid":"om_md"`,
+		`"action":"send","idx":0,"mid":"om_md"`,
 	} {
 		if !strings.Contains(card, want) {
 			t.Errorf("card missing %q\n%s", want, card)
@@ -245,12 +379,12 @@ func TestPadCardFences(t *testing.T) {
 
 // 最小参数（仅 mid+draft）：展示片段整体省略，不渲染空标题/空引用。
 func TestRenderDraftCardMinimal(t *testing.T) {
-	card := RenderDraftCard("om_min", "", "", "", "", "只有草稿", "text")
+	card := RenderDraftCard("om_min", "", "", "", "", []string{"只有草稿"}, "text")
 
 	for _, want := range []string{
 		`"schema":"2.0"`,
 		"**草稿**",
-		`"action":"send","mid":"om_min"`,
+		`"action":"send","idx":0,"mid":"om_min"`,
 		`"action":"copy"`,
 		`"action":"ignore"`,
 	} {
@@ -266,7 +400,7 @@ func TestRenderDraftCardMinimal(t *testing.T) {
 }
 
 func TestRenderDoneCard(t *testing.T) {
-	got, err := RenderDoneCard(testCardContent, doneSent)
+	got, err := RenderDoneCard(testCardContent, doneSent, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,14 +414,47 @@ func TestRenderDoneCard(t *testing.T) {
 	}
 }
 
+// 发送成功的多候选卡：只保留所选候选块，其余候选剔除；引用原消息等无
+// element_id 的块（含旧版本卡片全部块）不受过滤影响。
+func TestRenderDoneCardKeepsChosen(t *testing.T) {
+	draft := RenderDraftCard("om_k", "私聊", "张三", "", "原始消息",
+		[]string{"候选甲", "候选乙", "候选丙"}, "text")
+
+	got, err := RenderDoneCard(draft, doneSent, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"原始消息", "候选乙", "✅ 已发送"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q: %s", want, got)
+		}
+	}
+	for _, bad := range []string{"候选甲", "候选丙", "button"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("should not contain %q: %s", bad, got)
+		}
+	}
+
+	// keepIdx < 0（忽略/失效/失败态）：全部候选保留
+	got, err = RenderDoneCard(draft, doneIgnored, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"候选甲", "候选乙", "候选丙"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("keepIdx=-1 missing %q: %s", want, got)
+		}
+	}
+}
+
 // 完成态更新头部标题（脱离「待确认」）：发卡渲染标题，改卡替换为完成态标题。
 func TestRenderDoneCardUpdatesTitle(t *testing.T) {
-	draft := RenderDraftCard("om_title", "私聊", "张三", "12:03", "原始消息", "草稿内容", "text")
+	draft := RenderDraftCard("om_title", "私聊", "张三", "12:03", "原始消息", []string{"草稿内容"}, "text")
 	if !strings.Contains(draft, "回复草稿待确认") {
 		t.Fatalf("draft card should have pending title: %s", draft)
 	}
 
-	got, err := RenderDoneCard(draft, doneSent)
+	got, err := RenderDoneCard(draft, doneSent, -1)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,7 @@ type cardBehavior struct {
 
 type cardElement struct {
 	Tag       string         `json:"tag"`
+	ElementID string         `json:"element_id,omitempty"`
 	Content   string         `json:"content,omitempty"`
 	Text      *cardText      `json:"text,omitempty"`
 	Type      string         `json:"type,omitempty"`
@@ -90,9 +91,11 @@ func padCardFences(s string) string {
 }
 
 // RenderDraftCard 渲染草稿确认卡片 JSON（模板实例化从模型侧下沉到二进制）。
-// 仅 mid/draft 必给；scene/from/t/original 为展示字段，空值对应片段整体省略。
+// 仅 mid/drafts 必给；scene/from/t/original 为展示字段，空值对应片段整体省略。
 // format=="markdown" 时草稿按 markdown 渲染（预览≈对方所见），否则包围栏展示源文。
-func RenderDraftCard(mid, scene, from, t, original, draft, format string) string {
+// drafts 为候选列表（len >= 1）：单条时布局与文案同单草稿；多条时每条标注圈号
+// （①②③…，SKILL.md 约束 1–3 条，圈号字符到 ⑳ 为止）并各带自己的发送按钮。
+func RenderDraftCard(mid, scene, from, t, original string, drafts []string, format string) string {
 	var c draftCard
 	c.Schema = "2.0"
 	c.Config.UpdateMulti = true
@@ -117,14 +120,24 @@ func RenderDraftCard(mid, scene, from, t, original, draft, format string) string
 		}
 		c.Body.Elements = append(c.Body.Elements, cardElement{Tag: "markdown", Content: quoted})
 	}
-	draftMD := "**草稿**\n\n" + padCardFences(draft)
-	if format != "markdown" {
-		// 代码围栏前须空行（飞书卡片 markdown 实测要求）；草稿内含围栏时降级为 '''
-		draftMD = "**草稿**\n\n```\n" + strings.ReplaceAll(draft, "```", "'''") + "\n```"
+	single := len(drafts) == 1
+	for i, draft := range drafts {
+		head, label := "**草稿**", "发送"
+		if !single {
+			head = fmt.Sprintf("**草稿 %c**", '①'+i)
+			label = fmt.Sprintf("发送 %c", '①'+i)
+		}
+		draftMD := head + "\n\n" + padCardFences(draft)
+		if format != "markdown" {
+			// 代码围栏前须空行（飞书卡片 markdown 实测要求）；草稿内含围栏时降级为 '''
+			draftMD = head + "\n\n```\n" + strings.ReplaceAll(draft, "```", "'''") + "\n```"
+		}
+		c.Body.Elements = append(c.Body.Elements,
+			cardElement{Tag: "markdown", ElementID: fmt.Sprintf("draft-%d", i), Content: draftMD},
+			button(label, "primary_filled", map[string]any{"action": "send", "mid": mid, "idx": i}),
+		)
 	}
 	c.Body.Elements = append(c.Body.Elements,
-		cardElement{Tag: "markdown", Content: draftMD},
-		button("发送", "primary_filled", map[string]any{"action": "send", "mid": mid}),
 		button("复制草稿", "default", map[string]any{"action": "copy", "mid": mid}),
 		button("忽略", "default", map[string]any{"action": "ignore", "mid": mid}),
 	)
@@ -146,9 +159,12 @@ var (
 )
 
 // RenderDoneCard 基于卡片原稿生成完成态：更新头部标题、去掉全部按钮、末尾追加状态行。
+// keepIdx >= 0 时只保留 element_id 为 draft-<keepIdx> 的候选块（发送成功后卡片
+// 只留所发的那条）；keepIdx < 0 保留全部候选。旧卡片无 element_id，自然全保留。
 // 原稿必须是发卡时落盘的本地 JSON——回调返回的 card_content 是服务端 user_dsl
-// 序列化，markdown 换行在往返中会丢失，仅作缺原稿时的兜底。
-func RenderDoneCard(cardJSON string, st doneState) (string, error) {
+// 序列化，markdown 换行在往返中会丢失，仅作缺原稿时的兜底（该路径只走 doneStale，
+// 不做候选过滤，因此不依赖 element_id 在服务端往返中保留）。
+func RenderDoneCard(cardJSON string, st doneState, keepIdx int) (string, error) {
 	var card map[string]any
 	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
 		return "", err
@@ -167,8 +183,14 @@ func RenderDoneCard(cardJSON string, st doneState) (string, error) {
 	elements, _ := body["elements"].([]any)
 	kept := make([]any, 0, len(elements))
 	for _, el := range elements {
-		if m, ok := el.(map[string]any); ok && m["tag"] == "button" {
+		m, isMap := el.(map[string]any)
+		if isMap && m["tag"] == "button" {
 			continue
+		}
+		if keepIdx >= 0 && isMap {
+			if id, _ := m["element_id"].(string); strings.HasPrefix(id, "draft-") && id != fmt.Sprintf("draft-%d", keepIdx) {
+				continue
+			}
 		}
 		kept = append(kept, el)
 	}
