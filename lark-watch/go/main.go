@@ -41,6 +41,7 @@ func usage() {
   mark        标记会话已处理游标
   ignore-add  追加噪音正则
   send-card   起草确认卡片（pending 入库 + 渲染 + bot 私发）
+  send-draft  发送 pending 候选草稿（通知弹窗「发送」按钮的回调）
   notify      发送系统通知（--title --message --link；优先 notify 配置脚本，缺省内置弹窗）
   status      健康 JSON`)
 }
@@ -63,7 +64,7 @@ func dispatch(cmd string, args []string) error {
 	switch cmd {
 	case "run", "poll":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-		interval := fs.Int("interval", 45, "轮询间隔秒数")
+		interval := fs.Int("interval", 5, "轮询间隔秒数")
 		digestWindow := fs.Int64("digest-window", 600, "摘要时间窗秒数")
 		digestMax := fs.Int("digest-max", 20, "摘要条数阈值")
 		fs.Parse(args)
@@ -142,6 +143,21 @@ func dispatch(cmd string, args []string) error {
 		}
 		defer s.Close()
 		return watch.RunSendCard(s, cli, watch.DefaultPaths(), *mid, drafts, *original, *from, *scene, *t, *format, *note)
+
+	case "send-draft":
+		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+		mid := fs.String("mid", "", "原消息 message_id（pending 键）")
+		idx := fs.Int("idx", 0, "候选索引（0 = 候选①）")
+		fs.Parse(args)
+		if *mid == "" {
+			return fmt.Errorf("usage: lark-watch send-draft --mid <mid> [--idx N]")
+		}
+		s, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return watch.RunSendDraft(daemonCtx(), s, cli, *mid, *idx)
 
 	case "notify":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)

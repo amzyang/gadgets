@@ -23,6 +23,11 @@ P0 消息 → 模型起草（1–3 条候选）→ lark-watch send-card（pendin
 模型只负责起草 + 调 send-card；点击后完全旁路。
 ```
 
+发卡同时释放的系统通知弹窗也带「发送」按钮：AppleScript 经 do shell script 调
+`lark-watch send-draft --mid <mid>` 直接发候选①（幂等键同为 mid，弹窗/卡片双端
+点击不会双发）。发出后删 pending——其余候选失效，卡片按钮再点显示「已失效」
+（弹窗路径拿不到回调 token，无法改卡完成态，属预期）。
+
 ## 起草命令（模板渲染/转义/pending 全部内置于二进制）
 
 ```bash
@@ -76,5 +81,5 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 | 点按钮无反应 | `lark-watch status` 看 `consumer_state`；`lark-cli event status`；后台回调配置 |
 | consumer 反复重启 | stderr 里 consume 退出原因；`card.action.trigger` 仅允许一个 consumer，查残留进程 |
 | 改卡失败日志 | token 30min/2 次用尽，属预期；发送本身不受影响 |
-| 卡片显示「草稿已失效」 | pending 已被处理或清理，回终端重新起草 |
+| 卡片显示「草稿已失效」 | pending 已被处理或清理（含已经通知弹窗「发送」发出的情形），回终端确认状态 |
 | 单元测试 | `cd {SKILL_DIR}/go && go test ./...`（card_test.go 覆盖回调分支+去重+多候选模板渲染） |

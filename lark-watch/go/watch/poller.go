@@ -3,7 +3,6 @@ package watch
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"time"
 )
@@ -197,10 +196,10 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 			evlog.Info("notify.replied", "n", n)
 		}
 		if len(batch) > 0 {
-			if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
+			if script, enabled := LoadNotifyScript(p.Paths.ConfigDir); enabled {
 				p.dispatchNotify(ctx, script, batch, nowEpoch)
 			} else {
-				evlog.Info("notify.skip", "reason", "no-script", "n", len(batch))
+				evlog.Info("notify.skip", "reason", "off", "n", len(batch))
 			}
 		}
 		// tick 摘要：有动静（新消息 / search 兜底）记 Info，安静 tick 降 Debug
@@ -438,8 +437,8 @@ func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Mess
 }
 
 // flushDueNotify 释放到期未被 send-card 认领的延迟通知，内容与即时通知一致，
-// 只是晚到——且释放前复核已回复（等待期内本人亲自回复的不再弹）。脚本已被
-// 删除（通知被关闭）时到期条目直接丢弃。
+// 只是晚到——且释放前复核已回复（等待期内本人亲自回复的不再弹）。等待期间
+// 通知被关闭（off）时到期条目直接丢弃。
 func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 	batch, err := p.Store.NotifyDeferTakeDue(now)
 	if err != nil {
@@ -449,9 +448,9 @@ func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 	if batch = dropReplied(p.Store, batch); len(batch) == 0 {
 		return
 	}
-	script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify"))
-	evlog.Info("notify.flush", "n", len(batch), "mids", mids(batch), "script", script != "")
-	if script != "" {
+	script, enabled := LoadNotifyScript(p.Paths.ConfigDir)
+	evlog.Info("notify.flush", "n", len(batch), "mids", mids(batch), "script", script != "", "enabled", enabled)
+	if enabled {
 		go RunNotify(ctx, script, batch)
 	}
 }

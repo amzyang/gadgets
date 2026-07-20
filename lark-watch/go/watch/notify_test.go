@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -247,6 +248,104 @@ func TestRunNotifyVCSuppressed(t *testing.T) {
 	}
 	if rang.Load() != 0 {
 		t.Errorf("bell rang %d times, want 0", rang.Load())
+	}
+}
+
+// stubAlerter 注入 alerter 探测替身（macOS 开发机装有 alerter 时测试不能真弹横幅）。
+func stubAlerter(t *testing.T, path string) {
+	t.Helper()
+	old := lookAlerter
+	lookAlerter = func() string { return path }
+	t.Cleanup(func() { lookAlerter = old })
+}
+
+// alerter 草稿横幅：「发送」回调 send-draft、点正文 = 复制并跳转、60 秒超时；
+// 位置参数序与脚本引用一致；未安装 alerter 回退（ok=false）。
+func TestAlerterDraftArgs(t *testing.T) {
+	stubAlerter(t, "/opt/bin/alerter")
+	script, args, ok := alerterDraftArgs("标题", "摘要", "lark://x", "草稿内容", "om_1")
+	if !ok {
+		t.Fatal("want ok")
+	}
+	for _, want := range []string{`-actions "发送"`, `-closeLabel "忽略"`, "-timeout 60",
+		"send-draft --mid", "@CONTENTCLICKED", "pbcopy"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+	if len(args) != 7 || args[0] != "/opt/bin/alerter" || args[1] != "标题" ||
+		args[2] != "摘要\n\n—— 回复草稿 ——\n草稿内容" || args[4] != "om_1" ||
+		args[5] != "草稿内容" || args[6] != "lark://x" {
+		t.Errorf("args: %v", args)
+	}
+
+	stubAlerter(t, "")
+	if _, _, ok := alerterDraftArgs("t", "m", "l", "d", "om_1"); ok {
+		t.Error("no alerter should fall back to osascript")
+	}
+}
+
+// alerter 通用/VC 横幅：复制内容优先候选话术；VC 点正文或「加入」即入会。
+func TestAlerterGenericVCArgs(t *testing.T) {
+	stubAlerter(t, "/opt/bin/alerter")
+	script, args, ok := alerterGenericArgs("t", "msg", "lark://x", "")
+	if !ok || !strings.Contains(script, `-actions "复制"`) || args[3] != "msg" {
+		t.Errorf("generic: ok=%v args=%v", ok, args)
+	}
+	if _, args, _ := alerterGenericArgs("t", "msg", "", "话术"); args[3] != "话术" {
+		t.Errorf("draft should win copy text: %v", args)
+	}
+	script, args, ok = alerterVCArgs("t", "msg", "lark://vc")
+	if !ok || !strings.Contains(script, `"加入"|"@CONTENTCLICKED"`) || args[3] != "lark://vc" {
+		t.Errorf("vc: ok=%v args=%v", ok, args)
+	}
+}
+
+// 草稿弹窗：正文展示消息摘要＋候选①全文；「忽略/复制并跳转/发送」三键，
+// 回车 = 发送、忽略兼任 cancel button（Esc 即忽略）、60 秒超时；「发送」回调
+// send-draft、「复制并跳转」复制候选①并 open applink；argv 序与脚本 item 引用一致。
+func TestBuiltinDraftNotifyArgs(t *testing.T) {
+	lines, argv, ok := builtinDraftNotifyArgs("标题", "摘要", "lark://x", "草稿内容", "om_1")
+	if !ok {
+		t.Fatal("want ok")
+	}
+	script := strings.Join(lines, "\n")
+	for _, want := range []string{
+		`{"忽略", "复制并跳转", "发送"}`, `default button "发送"`,
+		`cancel button "忽略"`, "giving up after 60",
+		"send-draft --mid", "set the clipboard to (item 3 of argv)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+	if len(argv) != 6 || argv[0] != "摘要\n\n—— 回复草稿 ——\n草稿内容" ||
+		argv[1] != "标题" || argv[2] != "草稿内容" || argv[4] != "om_1" || argv[5] != "lark://x" {
+		t.Errorf("argv: %v", argv)
+	}
+	if _, _, ok := builtinDraftNotifyArgs("t", "m", "lark://x", "", "om_1"); ok {
+		t.Error("empty draft should fall back to generic popup")
+	}
+}
+
+// LoadNotifyScript：缺失 = 内置弹窗默认开（零配置）；空白/off = 总开关关闭；
+// 其余 = 自定义脚本。
+func TestLoadNotifyScript(t *testing.T) {
+	dir := t.TempDir()
+	if script, enabled := LoadNotifyScript(dir); script != "" || !enabled {
+		t.Errorf("missing file: got (%q, %v), want builtin enabled", script, enabled)
+	}
+	writeConfig(t, dir, "notify", "off\n")
+	if script, enabled := LoadNotifyScript(dir); script != "" || enabled {
+		t.Errorf("off: got (%q, %v), want disabled", script, enabled)
+	}
+	writeConfig(t, dir, "notify", "  \n")
+	if _, enabled := LoadNotifyScript(dir); enabled {
+		t.Error("blank file should disable notifications")
+	}
+	writeConfig(t, dir, "notify", `echo hi`)
+	if script, enabled := LoadNotifyScript(dir); script != "echo hi" || !enabled {
+		t.Errorf("script: got (%q, %v)", script, enabled)
 	}
 }
 

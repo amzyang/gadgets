@@ -164,18 +164,45 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 	}
 	logf("draft card sent for %s", mid)
 	// 草稿已就绪：认领并展示同会话被延迟的系统通知。查无延迟条目
-	// （已超时弹出 / 未配置通知 / 补课路径）则静默跳过，不会重复弹。
+	// （已超时弹出 / 通知已关闭 / 补课路径）则静默跳过，不会重复弹。
 	// 等草稿期间本人已亲自回复的也不再弹（卡片照发——草稿仍可能有参考
 	// 价值，只是不该再催）；chat_state 经 SQLite WAL 跨进程读 daemon 落盘值。
 	if msgs, ok := s.NotifyDeferClaimChat(mid); ok {
-		script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify"))
-		evlog.Info("notify.claim", "mid", mid, "n", len(msgs), "script", script != "")
-		if msgs = dropReplied(s, msgs); len(msgs) > 0 && script != "" {
-			StartNotify(context.Background(), script, msgs)
+		script, enabled := LoadNotifyScript(paths.ConfigDir)
+		evlog.Info("notify.claim", "mid", mid, "n", len(msgs), "script", script != "", "enabled", enabled)
+		if msgs = dropReplied(s, msgs); len(msgs) > 0 && enabled {
+			// 候选①与 pending 键随通知下发：弹窗「复制」给待发话术、「发送」直接回复。
+			StartNotify(context.Background(), script, msgs, drafts[0], mid)
 		}
 	} else {
 		evlog.Debug("notify.claim", "mid", mid, "n", 0) // 常态（已超时弹出/补课路径），降 debug
 	}
+	return nil
+}
+
+// RunSendDraft 是 send-draft 子命令入口（通知弹窗「发送」按钮的回调）：
+// 按 pending 里的候选直接以用户身份回复，语义与卡片「发送」一致（幂等键 =
+// 源消息 mid，弹窗/卡片双端点击也不会双发）。成功后删除 pending——其余候选
+// 随之失效，此后卡片按钮点击显示「已失效」（弹窗路径拿不到卡片回调 token，
+// 无法改卡完成态）。失败保留 pending 并弹错误提示（弹窗场景无终端可看，
+// 静默失败会让用户误以为已发出；提示弹窗 best-effort）。
+func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, mid string, idx int) error {
+	drafts, format, _, ok := s.PendingGet(mid)
+	if !ok {
+		sendDraftAlertFn(ctx, "草稿已失效", "草稿不存在或已处理（可能已在卡片端发送/忽略）", "", "")
+		return fmt.Errorf("no pending draft for %s", mid)
+	}
+	if idx < 0 || idx >= len(drafts) {
+		return fmt.Errorf("draft idx %d out of range for %s (%d drafts)", idx, mid, len(drafts))
+	}
+	if err := cli.ReplyAsUser(mid, drafts[idx], format); err != nil {
+		evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", false)
+		sendDraftAlertFn(ctx, "回复发送失败", "草稿发送失败，请回终端或卡片处理", "", "")
+		return err
+	}
+	s.PendingDelete(mid)
+	evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", true)
+	logf("sent reply for %s (candidate %d, via popup)", mid, idx)
 	return nil
 }
 

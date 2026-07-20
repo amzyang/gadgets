@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +49,8 @@ func waitForFile(t *testing.T, path string) []byte {
 	return nil
 }
 
-// send-card 发卡后释放同会话的延迟通知：脚本收到聚合摘要，条目被认领清空。
+// send-card 发卡后释放同会话的延迟通知：脚本收到聚合摘要与候选①话术
+// （LW_DRAFT，供弹窗「复制」用——复制的是待发回复而非对方消息），条目被认领清空。
 func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 	logs := captureEvlog(t)
 	s := openTestStore(t)
@@ -58,19 +60,21 @@ func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(t.TempDir(), "out")
 	t.Setenv("LW_TEST_OUT", out)
-	writeConfig(t, dir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	writeConfig(t, dir, "notify", `printf '%s|%s' "$LW_MESSAGE" "$LW_DRAFT" > "$LW_TEST_OUT"`)
 	s.NotifyDeferPut([]Message{
 		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_1", Type: "text", Text: "在吗"},
 		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_2", Type: "text", Text: "帮我看个问题"},
 	}, 99999)
 
-	draft := filepath.Join(dir, "d.md")
-	os.WriteFile(draft, []byte("好的，我看下"), 0o644)
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, "帮我看个问题", "张三", "私聊", "12:01", "text", ""); err != nil {
+	d1 := filepath.Join(dir, "d1.md")
+	d2 := filepath.Join(dir, "d2.md")
+	os.WriteFile(d1, []byte("好的，我看下"), 0o644)
+	os.WriteFile(d2, []byte("在忙，晚点回你"), 0o644)
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{d1, d2}, "帮我看个问题", "张三", "私聊", "12:01", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 
-	want := "张三（私聊）: 在吗\n张三（私聊）: 帮我看个问题"
+	want := "张三（私聊）: 在吗\n张三（私聊）: 帮我看个问题|好的，我看下"
 	if got := string(waitForFile(t, out)); got != want {
 		t.Errorf("notify message: got %q, want %q", got, want)
 	}
@@ -180,6 +184,67 @@ func TestRunSendCardDropsRepliedKeepsNewer(t *testing.T) {
 	}
 	if rang.Load() != 1 {
 		t.Errorf("bell rang %d times, want 1", rang.Load())
+	}
+}
+
+// stubSendDraftAlert 注入 send-draft 提示弹窗替身（真弹窗会在 macOS 上阻塞测试）。
+func stubSendDraftAlert(t *testing.T) *[]string {
+	t.Helper()
+	var alerts []string
+	old := sendDraftAlertFn
+	sendDraftAlertFn = func(_ context.Context, title, _, _, _ string) error {
+		alerts = append(alerts, title)
+		return nil
+	}
+	t.Cleanup(func() { sendDraftAlertFn = old })
+	return &alerts
+}
+
+// send-draft（弹窗「发送」回调）：按 idx 发送 pending 候选并删除 pending，
+// 语义与卡片「发送」一致（幂等键 = 源消息 mid）。
+func TestRunSendDraft(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	stubSendDraftAlert(t)
+	s.PendingPut("om_p1", []string{"候选一", "候选二"}, "text", "{}", 1)
+
+	if err := RunSendDraft(context.Background(), s, cli, "om_p1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if !cli.hasCall("reply om_p1 候选一 format=text") {
+		t.Errorf("reply args wrong: %v", cli.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_p1"); ok {
+		t.Error("pending should be deleted after send")
+	}
+}
+
+// send-draft 异常路径：pending 缺失 / idx 越界报错不发送；发送失败保留 pending
+// （可回卡片或终端重试），且缺失/失败均有提示弹窗（静默失败会误导）。
+func TestRunSendDraftErrors(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	alerts := stubSendDraftAlert(t)
+	if err := RunSendDraft(context.Background(), s, cli, "om_none", 0); err == nil {
+		t.Error("missing pending should error")
+	}
+	if cli.hasCall("reply") {
+		t.Errorf("no reply expected: %v", cli.calls)
+	}
+
+	s.PendingPut("om_p2", []string{"候选一"}, "text", "{}", 1)
+	if err := RunSendDraft(context.Background(), s, cli, "om_p2", 1); err == nil {
+		t.Error("idx out of range should error")
+	}
+	cli.failReply = true
+	if err := RunSendDraft(context.Background(), s, cli, "om_p2", 0); err == nil {
+		t.Error("reply failure should propagate")
+	}
+	if _, _, _, ok := s.PendingGet("om_p2"); !ok {
+		t.Error("pending must be kept after failed send")
+	}
+	if len(*alerts) != 2 || (*alerts)[0] != "草稿已失效" || (*alerts)[1] != "回复发送失败" {
+		t.Errorf("alerts: %v", *alerts)
 	}
 }
 

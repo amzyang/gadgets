@@ -686,7 +686,7 @@ func TestTickVCPrefersNotifyVCScript(t *testing.T) {
 	}
 }
 
-// notify 总开关缺失时 notify-vc 不生效：VC 不弹任何通知。
+// notify 总开关 off 时 notify-vc 不生效：VC 不弹任何通知。
 func TestTickVCNeedsNotifyMasterSwitch(t *testing.T) {
 	stubBell(t)
 	stubProbes(t, "net.kovidgoyal.kitty", 0)
@@ -700,6 +700,7 @@ func TestTickVCNeedsNotifyMasterSwitch(t *testing.T) {
 	p, _ := newTestPoller(t, f, 2000)
 	outDir := t.TempDir()
 	t.Setenv("LW_TEST_OUT", outDir)
+	writeConfig(t, p.Paths.ConfigDir, "notify", "off")
 	writeConfig(t, p.Paths.ConfigDir, "notify-vc", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT/vc"`)
 	p.Store.SetFetchCursor("oc_a", 1000)
 
@@ -775,6 +776,7 @@ func TestTickLogsKeepDropDup(t *testing.T) {
 	}
 	p, _ := newTestPoller(t, f, 2000)
 	writeConfig(t, p.Paths.ConfigDir, "ignore", "吃什么\n")
+	writeConfig(t, p.Paths.ConfigDir, "notify", "off\n")
 	p.Store.SetFetchCursor("oc_a", 1000)
 
 	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
@@ -808,8 +810,8 @@ func TestTickLogsKeepDropDup(t *testing.T) {
 		emits[0]["mid"] != "om_new" {
 		t.Errorf("emit: %v", emits)
 	}
-	// 未配置 notify 脚本但有 P0 批次：跳过留痕
-	if r := findLogs(recs, "notify.skip"); len(r) != 1 || r[0]["reason"] != "no-script" {
+	// notify 配置为 off 但有 P0 批次：跳过留痕
+	if r := findLogs(recs, "notify.skip"); len(r) != 1 || r[0]["reason"] != "off" {
 		t.Errorf("notify.skip: %v", r)
 	}
 
