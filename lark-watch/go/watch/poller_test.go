@@ -485,8 +485,8 @@ func TestTickDefersNotifyUntilDraftOrTimeout(t *testing.T) {
 	if _, err := os.Stat(out); err == nil {
 		t.Fatal("notify script ran at tick time, want deferred")
 	}
-	if *rang != 0 {
-		t.Errorf("bell rang %d times at tick time, want 0", *rang)
+	if rang.Load() != 0 {
+		t.Errorf("bell rang %d times at tick time, want 0", rang.Load())
 	}
 
 	// 未到期不释放；到期释放且内容与即时通知一致
@@ -499,19 +499,20 @@ func TestTickDefersNotifyUntilDraftOrTimeout(t *testing.T) {
 	if got := string(waitForFile(t, out)); got != "张三（私聊）: 帮我看个问题" {
 		t.Errorf("deferred notify message: got %q", got)
 	}
-	if *rang != 1 {
-		t.Errorf("bell rang %d times after flush, want 1", *rang)
+	if rang.Load() != 1 {
+		t.Errorf("bell rang %d times after flush, want 1", rang.Load())
 	}
 }
 
-// 音视频会议不延迟：即时执行通知脚本。
+// 音视频会议不延迟：即时走专用内置弹窗，不经通用 notify 脚本、不入延迟队列。
 func TestTickNotifiesVCImmediately(t *testing.T) {
 	stubBell(t)
 	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	calls := stubVCDialog(t)
 	f := &listFake{
 		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
 		msgs: map[string]string{"oc_a": chatMsgsResp(false,
-			rawVCJSON("om_v", "ou_alice", "张三", "2026-07-17 12:00"),
+			rawVCJSON("om_v3", "ou_alice", "张三", "2026-07-17 12:00"),
 		)},
 	}
 	p, _ := newTestPoller(t, f, 2000)
@@ -523,11 +524,124 @@ func TestTickNotifiesVCImmediately(t *testing.T) {
 	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(waitForFile(t, out)); got != "张三（私聊）: 发起了音视频会议" {
-		t.Errorf("vc notify message: got %q", got)
+	if got := waitForDialog(t, calls); got[1] != "张三（私聊）: 发起了音视频会议" {
+		t.Errorf("vc dialog message: got %q", got[1])
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(out); err == nil {
+		t.Error("generic notify script ran for VC, want dedicated dialog only")
 	}
 	if msgs, _ := p.Store.NotifyDeferTakeDue(1 << 40); len(msgs) != 0 {
 		t.Errorf("vc must not enter defer queue: %v", msgs)
+	}
+}
+
+// notify-vc 配置存在时覆盖内置弹窗；VC 批次仍不经通用 notify 脚本。
+func TestTickVCPrefersNotifyVCScript(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	calls := stubVCDialog(t)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "李四", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawVCJSON("om_v4", "ou_bob", "李四", "2026-07-17 12:01"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	outDir := t.TempDir()
+	t.Setenv("LW_TEST_OUT", outDir)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT/generic"`)
+	writeConfig(t, p.Paths.ConfigDir, "notify-vc",
+		`printf '%s|%s' "$LW_TITLE" "$LW_MESSAGE" > "$LW_TEST_OUT/vc"`)
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(waitForFile(t, filepath.Join(outDir, "vc"))); got != "📞 音视频会议|李四（私聊）: 发起了音视频会议" {
+		t.Errorf("notify-vc output: got %q", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(outDir, "generic")); err == nil {
+		t.Error("generic notify script ran for VC")
+	}
+	if len(calls) != 0 {
+		t.Error("builtin dialog called despite notify-vc script")
+	}
+}
+
+// notify 总开关缺失时 notify-vc 不生效：VC 不弹任何通知。
+func TestTickVCNeedsNotifyMasterSwitch(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	calls := stubVCDialog(t)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "王五", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawVCJSON("om_v5", "ou_carol", "王五", "2026-07-17 12:02"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	outDir := t.TempDir()
+	t.Setenv("LW_TEST_OUT", outDir)
+	writeConfig(t, p.Paths.ConfigDir, "notify-vc", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT/vc"`)
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(outDir, "vc")); err == nil {
+		t.Error("notify-vc ran without notify master switch")
+	}
+	if len(calls) != 0 {
+		t.Error("builtin dialog called without notify master switch")
+	}
+}
+
+// grace=0 的即时回退不混批：VC 走专用弹窗、文本走通用脚本，内容互不混入。
+func TestDispatchNotifyGraceZeroSplits(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	calls := stubVCDialog(t)
+	t.Setenv("LW_NOTIFY_GRACE", "0")
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+
+	p.dispatchNotify(context.Background(), `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`, []Message{
+		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: "lark://vc"},
+		{From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗"},
+	}, 2000)
+
+	if got := waitForDialog(t, calls); got[1] != "李四（私聊）: 发起了音视频会议" {
+		t.Errorf("vc dialog message: got %q", got[1])
+	}
+	if got := string(waitForFile(t, out)); got != "张三（私聊）: 在吗" {
+		t.Errorf("generic notify message: got %q", got)
+	}
+}
+
+// 延迟入库失败退回即时通知，同样不混批。
+func TestDispatchNotifyDeferFailFallback(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	calls := stubVCDialog(t)
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	p.Store.Close() // NotifyDeferPut 必然失败
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+
+	p.dispatchNotify(context.Background(), `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`, []Message{
+		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: "lark://vc"},
+		{From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗"},
+	}, 2000)
+
+	if got := waitForDialog(t, calls); got[1] != "李四（私聊）: 发起了音视频会议" {
+		t.Errorf("vc dialog message: got %q", got[1])
+	}
+	if got := string(waitForFile(t, out)); got != "张三（私聊）: 在吗" {
+		t.Errorf("generic notify message: got %q", got)
 	}
 }
 

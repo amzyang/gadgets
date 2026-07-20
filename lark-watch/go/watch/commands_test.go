@@ -73,8 +73,8 @@ func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 	if got := string(waitForFile(t, out)); got != want {
 		t.Errorf("notify message: got %q, want %q", got, want)
 	}
-	if *rang != 1 {
-		t.Errorf("bell rang %d times, want 1", *rang)
+	if rang.Load() != 1 {
+		t.Errorf("bell rang %d times, want 1", rang.Load())
 	}
 	if _, ok := s.NotifyDeferClaimChat("om_1"); ok {
 		t.Error("deferred entries should be claimed and cleared")
@@ -101,8 +101,8 @@ func TestRunSendCardNoDeferredNotify(t *testing.T) {
 	if _, err := os.Stat(out); err == nil {
 		t.Error("notify script ran, want skipped (nothing deferred)")
 	}
-	if *rang != 0 {
-		t.Errorf("bell rang %d times, want 0", *rang)
+	if rang.Load() != 0 {
+		t.Errorf("bell rang %d times, want 0", rang.Load())
 	}
 }
 

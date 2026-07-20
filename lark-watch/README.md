@@ -65,6 +65,7 @@ Claude 会启动后台监控并常驻：P0 消息（私聊/@你/会议/重点人
 | `keywords` | 正文关键词正则，命中升 P0 |
 | `ignore` | 噪音正则，命中直接丢弃 |
 | `notify` | P0 系统弹窗命令（macOS），详见 SKILL.md |
+| `notify-vc` | 音视频会议专用弹窗命令（可选；缺省内置「忽略/加入」弹窗）|
 
 状态存 `~/.local/state/lark-watch/lark-watch.db`（SQLite，只落本机）。
 

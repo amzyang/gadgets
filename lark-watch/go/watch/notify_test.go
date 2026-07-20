@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestReadNotifyScript(t *testing.T) {
@@ -23,13 +25,15 @@ func TestReadNotifyScript(t *testing.T) {
 }
 
 // stubBell 静音响铃并记录调用次数（响铃是 IO 边缘，测试不真响）。
-func stubBell(t *testing.T) *int {
+// 原子计数：dispatchNotify/flushDueNotify 在 goroutine 里响铃，与断言读并发，
+// 文件系统轮询不构成 happens-before 边，读写都必须走 atomic。
+func stubBell(t *testing.T) *atomic.Int32 {
 	t.Helper()
-	called := 0
+	called := new(atomic.Int32)
 	old := bellFn
-	bellFn = func(context.Context) { called++ }
+	bellFn = func(context.Context) { called.Add(1) }
 	t.Cleanup(func() { bellFn = old })
-	return &called
+	return called
 }
 
 // stubProbes 注入 frontmost / idle 探测替身（系统探测是 IO 边缘，测试不真探）。
@@ -39,6 +43,32 @@ func stubProbes(t *testing.T, bundleID string, idleSecs float64) {
 	frontmostBundleID = func(context.Context) string { return bundleID }
 	hidIdleSecs = func(context.Context) float64 { return idleSecs }
 	t.Cleanup(func() { frontmostBundleID, hidIdleSecs = oldF, oldI })
+}
+
+// stubVCDialog 注入内置 VC 弹窗替身并以 channel 记录调用参数
+// （poller 侧经 go 异步调用，channel 才能安全跨 goroutine 断言）。
+func stubVCDialog(t *testing.T) chan [3]string {
+	t.Helper()
+	calls := make(chan [3]string, 4)
+	old := vcDialogFn
+	vcDialogFn = func(_ context.Context, title, message, link string) error {
+		calls <- [3]string{title, message, link}
+		return nil
+	}
+	t.Cleanup(func() { vcDialogFn = old })
+	return calls
+}
+
+// waitForDialog 等待弹窗替身被调用（RunNotifyVC 可能在 goroutine 里跑）。
+func waitForDialog(t *testing.T, calls chan [3]string) [3]string {
+	t.Helper()
+	select {
+	case got := <-calls:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("vc dialog not shown")
+		return [3]string{}
+	}
 }
 
 func TestShouldSuppressNotify(t *testing.T) {
@@ -79,8 +109,8 @@ func TestRunNotifySuppressed(t *testing.T) {
 	if _, err := os.Stat(out); err == nil {
 		t.Error("notify script ran, want suppressed")
 	}
-	if *rang != 0 {
-		t.Errorf("bell rang %d times, want 0", *rang)
+	if rang.Load() != 0 {
+		t.Errorf("bell rang %d times, want 0", rang.Load())
 	}
 }
 
@@ -127,8 +157,96 @@ func TestRunNotify(t *testing.T) {
 	if string(b) != want {
 		t.Errorf("got %q, want %q", b, want)
 	}
-	if *rang != 1 {
-		t.Errorf("bell rang %d times, want 1", *rang)
+	if rang.Load() != 1 {
+		t.Errorf("bell rang %d times, want 1", rang.Load())
+	}
+}
+
+// 未配置 notify-vc 时走内置弹窗：标题（多条带条数）、每条一行摘要、link 取首条。
+func TestRunNotifyVCBuiltin(t *testing.T) {
+	link1 := "lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"
+	link2 := "lark://applink.feishu.cn/client/chat/open?openChatId=oc_a&position=9"
+	cases := []struct {
+		name  string
+		batch []Message
+		want  [3]string
+	}{
+		{"单条", []Message{
+			{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: link1},
+		}, [3]string{"📞 音视频会议", "李四（私聊）: 发起了音视频会议", link1}},
+		{"多条", []Message{
+			{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: link1},
+			{From: strPtr("张三"), Chat: strPtr("测试群"), Ctype: "group", Type: "vc_meeting", Link: link2},
+		}, [3]string{"📞 音视频会议（2 条）",
+			"李四（私聊）: 发起了音视频会议\n张三（测试群）: 发起了音视频会议", link1}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rang := stubBell(t)
+			stubProbes(t, "net.kovidgoyal.kitty", 0)
+			calls := stubVCDialog(t)
+
+			RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, c.batch)
+
+			if got := waitForDialog(t, calls); got != c.want {
+				t.Errorf("dialog args:\n got %q\nwant %q", got, c.want)
+			}
+			if rang.Load() != 1 {
+				t.Errorf("bell rang %d times, want 1", rang.Load())
+			}
+		})
+	}
+}
+
+// notify-vc 配置脚本覆盖内置弹窗：LW_* 环境同通用批次，仅标题换音视频会议。
+func TestRunNotifyVCScript(t *testing.T) {
+	rang := stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	calls := stubVCDialog(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, dir, "notify-vc",
+		`printf '%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_TYPE" "$LW_LINK" "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+
+	RunNotifyVC(context.Background(), Paths{ConfigDir: dir}, []Message{
+		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat",
+			Link: "lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"},
+	})
+
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("notify-vc output not written: %v", err)
+	}
+	want := "📞 音视频会议|1|video_chat|" +
+		"lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5|" +
+		"李四（私聊）: 发起了音视频会议"
+	if string(b) != want {
+		t.Errorf("got %q, want %q", b, want)
+	}
+	if len(calls) != 0 {
+		t.Error("builtin dialog called, want notify-vc script only")
+	}
+	if rang.Load() != 1 {
+		t.Errorf("bell rang %d times, want 1", rang.Load())
+	}
+}
+
+// 前台抑制对 VC 同样生效：不响铃、不弹窗。
+func TestRunNotifyVCSuppressed(t *testing.T) {
+	rang := stubBell(t)
+	stubProbes(t, "com.electron.lark", 3)
+	calls := stubVCDialog(t)
+
+	RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, []Message{
+		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: "lark://x"},
+	})
+
+	if len(calls) != 0 {
+		t.Error("dialog shown, want suppressed")
+	}
+	if rang.Load() != 0 {
+		t.Errorf("bell rang %d times, want 0", rang.Load())
 	}
 }
 
@@ -153,7 +271,7 @@ func TestRunNotifyCommand(t *testing.T) {
 	if string(b) != want {
 		t.Errorf("got %q, want %q", b, want)
 	}
-	if *rang != 1 {
-		t.Errorf("bell rang %d times, want 1", *rang)
+	if rang.Load() != 1 {
+		t.Errorf("bell rang %d times, want 1", rang.Load())
 	}
 }

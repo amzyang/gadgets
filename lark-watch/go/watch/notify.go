@@ -19,8 +19,17 @@ func ReadNotifyScript(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
+// 批次通知的标题基串：通用 P0 与音视频会议专用弹窗各一。
+const (
+	p0NotifyTitle = "飞书 P0"
+	vcNotifyTitle = "📞 音视频会议"
+)
+
 // bellFn 是响铃入口，可注入测试替身（响铃是 IO 边缘）。
 var bellFn = ringBell
+
+// vcDialogFn 是内置音视频会议弹窗入口，可注入测试替身（osascript 是 IO 边缘）。
+var vcDialogFn = builtinNotifyVC
 
 // ringBell 响铃提醒（内置自 ~/.local/bin/bell 的 always 逻辑）：
 // 终端 bell 优先，无控制终端（daemon/Monitor 场景）回退 osascript beep；
@@ -139,9 +148,31 @@ func RunNotify(ctx context.Context, script string, batch []Message) {
 		return
 	}
 	bellFn(ctx)
-	err := runNotifyScript(ctx, script, batchNotifyEnv(batch)...)
+	err := runNotifyScript(ctx, script, batchNotifyEnv(p0NotifyTitle, batch)...)
 	if err != nil && ctx.Err() == nil {
 		logf("notify command failed: %v", err)
+	}
+}
+
+// RunNotifyVC 是音视频会议批次的专用通知：会议邀请实时性最强、「加入」是唯一
+// 有意义的动作，不走通用 notify 脚本。优先执行 notify-vc 配置脚本（每次现读，
+// 改完即生效；LW_* 环境与通用批次一致，仅标题换 vcNotifyTitle），缺失时回退
+// 内置「忽略/加入」弹窗。抑制与响铃语义同 RunNotify；同步阻塞至弹窗关闭，
+// 调用方需自行 go。
+func RunNotifyVC(ctx context.Context, paths Paths, batch []Message) {
+	if shouldSuppressNotify(ctx) {
+		logf("notify suppressed: Lark frontmost and user active")
+		return
+	}
+	bellFn(ctx)
+	var err error
+	if script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify-vc")); script != "" {
+		err = runNotifyScript(ctx, script, batchNotifyEnv(vcNotifyTitle, batch)...)
+	} else {
+		err = vcDialogFn(ctx, batchTitle(vcNotifyTitle, len(batch)), batchSummary(batch), batch[0].Link)
+	}
+	if err != nil && ctx.Err() == nil {
+		logf("vc notify failed: %v", err)
 	}
 }
 
@@ -155,7 +186,7 @@ func StartNotify(ctx context.Context, script string, batch []Message) {
 	}
 	bellFn(ctx)
 	cmd := exec.Command("sh", "-c", script)
-	cmd.Env = append(os.Environ(), batchNotifyEnv(batch)...)
+	cmd.Env = append(os.Environ(), batchNotifyEnv(p0NotifyTitle, batch)...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -165,8 +196,28 @@ func StartNotify(ctx context.Context, script string, batch []Message) {
 
 // batchNotifyEnv 是批次通知的完整 LW_* 环境：标题（多条带条数）、每条一行的
 // 聚合摘要、首条的链接与扩展字段。
-func batchNotifyEnv(batch []Message) []string {
+func batchNotifyEnv(titleBase string, batch []Message) []string {
 	first := batch[0]
+	return append(notifyEnv(batchTitle(titleBase, len(batch)), batchSummary(batch), first.Link),
+		"LW_COUNT="+strconv.Itoa(len(batch)),
+		"LW_FROM="+deref(first.From),
+		"LW_CHAT="+deref(first.Chat),
+		"LW_CTYPE="+first.Ctype,
+		"LW_TYPE="+first.Type,
+		"LW_TEXT="+first.Text,
+	)
+}
+
+// batchTitle 是批次通知标题：多条时带条数。
+func batchTitle(base string, n int) string {
+	if n > 1 {
+		return fmt.Sprintf("%s（%d 条）", base, n)
+	}
+	return base
+}
+
+// batchSummary 是每条一行的批次摘要（发送者（群名|私聊）: 正文）。
+func batchSummary(batch []Message) string {
 	lines := make([]string, 0, len(batch))
 	for _, m := range batch {
 		scene := deref(m.Chat)
@@ -175,19 +226,7 @@ func batchNotifyEnv(batch []Message) []string {
 		}
 		lines = append(lines, deref(m.From)+"（"+scene+"）: "+notifyText(m))
 	}
-	title := "飞书 P0"
-	if len(batch) > 1 {
-		title = fmt.Sprintf("飞书 P0（%d 条）", len(batch))
-	}
-	summary := strings.Join(lines, "\n")
-	return append(notifyEnv(title, summary, first.Link),
-		"LW_COUNT="+strconv.Itoa(len(batch)),
-		"LW_FROM="+deref(first.From),
-		"LW_CHAT="+deref(first.Chat),
-		"LW_CTYPE="+first.Ctype,
-		"LW_TYPE="+first.Type,
-		"LW_TEXT="+first.Text,
-	)
+	return strings.Join(lines, "\n")
 }
 
 // notifyEnv 是 LW_* 基础环境变量（标题/内容/摘要/链接）；批次调用再追加扩展字段。
@@ -244,6 +283,25 @@ func builtinNotify(ctx context.Context, title, message, link string) error {
 		}
 		argv = append(argv, link)
 	}
+	return runOsascript(ctx, lines, argv)
+}
+
+// builtinNotifyVC 内置音视频会议弹窗（未配置 notify-vc 时的回退，响铃在调用方）：
+// 「忽略/加入」按钮、默认「加入」，点「加入」open 首条 applink 直达会话中的
+// 会议消息；60 秒无操作自动关闭，防弹窗进程堆积。VC 消息的 link 来自
+// message_app_link 恒有值，不设无 link 分支。
+func builtinNotifyVC(ctx context.Context, title, message, link string) error {
+	return runOsascript(ctx, []string{
+		"on run argv",
+		`set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {"忽略", "加入"} default button "加入" giving up after 60`,
+		`if button returned of r is "加入" then do shell script "open " & quoted form of (item 3 of argv)`,
+		"end run",
+	}, []string{message, title, link})
+}
+
+// runOsascript 逐行 -e 组装 AppleScript 并以 argv 传参（消息不拼进源码，
+// 正文里的引号不会破坏脚本或被注入）；输出走 stderr，不污染事件流。
+func runOsascript(ctx context.Context, lines, argv []string) error {
 	args := make([]string, 0, 2*len(lines)+len(argv))
 	for _, l := range lines {
 		args = append(args, "-e", l)

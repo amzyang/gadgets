@@ -177,8 +177,8 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 			s.DigestAppend(p1)
 		}
 		// 通知命令：每 tick 的 P0 批次聚合为一次调用（避免弹窗轰炸），异步不阻塞轮询；
-		// 本人已回复的不打扰（音视频会议豁免）。需要起草的 P0 延迟到草稿就绪后展示
-		// （见 dispatchNotify）。
+		// 本人已回复的不打扰（音视频会议豁免）。需要起草的 P0 延迟到草稿就绪后展示，
+		// 音视频会议走专用弹窗路径即时弹（见 dispatchNotify）。
 		if batch := notifyBatch(p0, selfLast); len(batch) > 0 {
 			if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
 				p.dispatchNotify(ctx, script, batch, nowEpoch)
@@ -355,29 +355,32 @@ func notifyBatch(p0 []Message, selfLast map[string]string) []Message {
 	return out
 }
 
-// dispatchNotify 分流通知批次：音视频会议即时弹（跳过起草，无草稿可等）；
-// 其余 P0 入延迟队列，由 send-card 认领（草稿就绪即通知）或 notifyGraceSecs
-// 超时兜底（flushDueNotify）。延迟入库失败退回即时通知（宁可早弹不可漏弹）。
+// dispatchNotify 分流通知批次：音视频会议走专用「忽略/加入」弹窗路径即时弹
+// （跳过起草，无草稿可等；样式与通用弹窗不同，永不混批）；其余 P0 入延迟
+// 队列，由 send-card 认领（草稿就绪即通知）或 notifyGraceSecs 超时兜底
+// （flushDueNotify）。延迟入库失败退回即时通知（宁可早弹不可漏弹）。
 func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Message, now int64) {
-	var immediate, deferred []Message
+	var vc, rest []Message
 	for _, m := range batch {
 		if vcTypes[m.Type] {
-			immediate = append(immediate, m)
+			vc = append(vc, m)
 		} else {
-			deferred = append(deferred, m)
+			rest = append(rest, m)
 		}
+	}
+	if len(vc) > 0 {
+		go RunNotifyVC(ctx, p.Paths, vc)
+	}
+	if len(rest) == 0 {
+		return
 	}
 	if notifyGraceSecs() <= 0 {
-		immediate, deferred = batch, nil
+		go RunNotify(ctx, script, rest)
+		return
 	}
-	if len(deferred) > 0 {
-		if err := p.Store.NotifyDeferPut(deferred, now+notifyGraceSecs()); err != nil {
-			logf("notify defer failed, notifying now: %v", err)
-			immediate = append(immediate, deferred...)
-		}
-	}
-	if len(immediate) > 0 {
-		go RunNotify(ctx, script, immediate)
+	if err := p.Store.NotifyDeferPut(rest, now+notifyGraceSecs()); err != nil {
+		logf("notify defer failed, notifying now: %v", err)
+		go RunNotify(ctx, script, rest)
 	}
 }
 

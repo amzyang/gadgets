@@ -76,7 +76,8 @@ stdout 每行一个 JSON 事件，`p` 字段区分类型。**判断权在模型*
 
 `type` 为 `video_chat`/`vc_meeting`（发起或分享视频/语音会议）时 `text` 常为空：
 这类事件实时性最强（不聚合、不带 replied），跳过细判与草稿，立即转述
-「谁在哪发起了会议」+ `link` 让用户点击加入。
+「谁在哪发起了会议」+ `link` 让用户点击加入。系统侧已弹出专用「忽略/加入」
+弹窗（见 `notify-vc`），转述职责不变。
 
 处理流程：
 
@@ -268,7 +269,8 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
   卡片发出（`send-card`）后再展示——通知到达时飞书里已有可点的确认卡片，
   模型无需额外操作。窗口内未发卡（判定 FYI 无需回复、起草超时）则在
   `LW_NOTIFY_GRACE`（环境变量，默认 180 秒）后照常弹出兜底；音视频会议仍
-  即时通知，`LW_NOTIFY_GRACE=0` 恢复全部即时。停机重启时过旧的待弹通知
+  即时通知（走专用「忽略/加入」弹窗或 `notify-vc` 脚本，不经 notify 脚本），
+  `LW_NOTIFY_GRACE=0` 恢复全部即时。停机重启时过旧的待弹通知
   自动丢弃（不弹陈旧消息）。
 
   飞书客户端处于前台且用户活跃（输入空闲 < 2 分钟）时自动跳过响铃与通知
@@ -283,6 +285,19 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
   （优先走 notify 配置脚本；未配置时回退内置「忽略/复制/跳转」弹窗，无 `--link`
   则「复制/OK」按钮）。弹窗会阻塞到用户点击或 60 秒超时，模型调用时用
   `run_in_background`。
+- `notify-vc`：音视频会议（`video_chat`/`vc_meeting`）专用通知命令，覆盖 VC
+  批次的弹窗样式；`notify` 仍是通知总开关（notify 缺失时 notify-vc 不生效）。
+  环境变量与 notify 相同，仅 `LW_TITLE` 为「📞 音视频会议」（多条带条数）。
+  缺失时用内置「忽略/加入」弹窗：默认「加入」，点「加入」open 首条 applink
+  直达会话中的会议消息，60 秒无操作自动关闭。响铃与前台抑制同样适用。
+  自定义样式从内置等价模板起步：
+
+  ```sh
+  osascript -e 'on run argv
+  set r to display dialog (item 1 of argv) with title (item 2 of argv) buttons {"忽略", "加入"} default button "加入" giving up after 60
+  if button returned of r is "加入" then do shell script "open " & quoted form of (item 3 of argv)
+  end run' "$LW_MESSAGE" "$LW_TITLE" "$LW_LINK"
+  ```
 
 ## 状态与排错
 
