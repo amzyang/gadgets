@@ -54,20 +54,25 @@ func TestParseAuthStatusUnavailable(t *testing.T) {
 }
 
 func TestReplyArgs(t *testing.T) {
-	text := strings.Join(replyArgs("om_1", "草稿", "text"), " ")
+	text := strings.Join(replyArgs("om_1", "草稿", "text", "om_1"), " ")
 	if !strings.Contains(text, "--text 草稿") || strings.Contains(text, "--markdown") {
 		t.Fatalf("text format: %s", text)
 	}
-	md := strings.Join(replyArgs("om_1", "```go\nx\n```", "markdown"), " ")
+	md := strings.Join(replyArgs("om_1", "```go\nx\n```", "markdown", "om_1"), " ")
 	if !strings.Contains(md, "--markdown") || strings.Contains(md, "--text") {
 		t.Fatalf("markdown format: %s", md)
 	}
-	for _, argv := range [][]string{replyArgs("om_1", "d", "text"), replyArgs("om_1", "d", "markdown")} {
+	for _, argv := range [][]string{replyArgs("om_1", "d", "text", "om_1"), replyArgs("om_1", "d", "markdown", "om_1")} {
 		joined := strings.Join(argv, " ")
 		if !strings.Contains(joined, "--message-id om_1") || !strings.Contains(joined, "--idempotency-key om_1") ||
 			!strings.Contains(joined, "--as user") {
 			t.Fatalf("common args missing: %s", joined)
 		}
+	}
+	// 快捷回复走独立幂等键（与「发送」的 mid 键分离）
+	keyed := strings.Join(replyArgs("om_1", "收到", "text", "om_1-q-abcd1234"), " ")
+	if !strings.Contains(keyed, "--idempotency-key om_1-q-abcd1234") {
+		t.Fatalf("keyed args: %s", keyed)
 	}
 }
 

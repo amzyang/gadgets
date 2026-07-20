@@ -42,6 +42,8 @@ func usage() {
   ignore-add  追加噪音正则
   send-card   起草确认卡片（pending 入库 + 渲染 + bot 私发）
   send-draft  发送 pending 候选草稿（通知弹窗「发送」按钮的回调）
+  send-text   以常用语快捷回复源消息（通知横幅动作的回调）
+  react       给源消息加表情回应（通知横幅动作的回调）
   notify      发送系统通知（--title --message --link；优先 notify 配置脚本，缺省内置弹窗）
   status      健康 JSON`)
 }
@@ -144,9 +146,9 @@ func dispatch(cmd string, args []string) error {
 		defer s.Close()
 		return watch.RunSendCard(s, cli, watch.DefaultPaths(), *mid, drafts, *original, *from, *scene, *t, *format, *note)
 
-	case "send-draft":
+	case watch.CmdSendDraft:
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-		mid := fs.String("mid", "", "原消息 message_id（pending 键）")
+		mid := fs.String(watch.FlagMid, "", "原消息 message_id（pending 键）")
 		idx := fs.Int("idx", 0, "候选索引（0 = 候选①）")
 		fs.Parse(args)
 		if *mid == "" {
@@ -157,7 +159,32 @@ func dispatch(cmd string, args []string) error {
 			return err
 		}
 		defer s.Close()
-		return watch.RunSendDraft(daemonCtx(), s, cli, *mid, *idx)
+		return watch.RunSendDraft(daemonCtx(), s, cli, watch.DefaultPaths(), *mid, *idx)
+
+	case watch.CmdSendText:
+		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+		mid := fs.String(watch.FlagMid, "", "源消息 message_id")
+		text := fs.String(watch.FlagText, "", "常用语文本")
+		fs.Parse(args)
+		if *mid == "" || *text == "" {
+			return fmt.Errorf("usage: lark-watch send-text --mid <mid> --text <text>")
+		}
+		s, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return watch.RunSendText(daemonCtx(), s, cli, watch.DefaultPaths(), *mid, *text)
+
+	case watch.CmdReact:
+		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+		mid := fs.String(watch.FlagMid, "", "源消息 message_id")
+		emoji := fs.String(watch.FlagEmoji, "THUMBSUP", "飞书 emoji_type（如 THUMBSUP/OK/DONE）")
+		fs.Parse(args)
+		if *mid == "" {
+			return fmt.Errorf("usage: lark-watch react --mid <mid> [--emoji THUMBSUP]")
+		}
+		return watch.RunReact(daemonCtx(), cli, watch.DefaultPaths(), *mid, *emoji)
 
 	case "notify":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)

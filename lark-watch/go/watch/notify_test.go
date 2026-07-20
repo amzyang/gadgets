@@ -103,7 +103,7 @@ func TestRunNotifySuppressed(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "out")
 	t.Setenv("LW_TEST_OUT", out)
 
-	RunNotify(context.Background(), `touch "$LW_TEST_OUT"`, []Message{
+	RunNotify(context.Background(), t.TempDir(), `touch "$LW_TEST_OUT"`, []Message{
 		{From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗"},
 	})
 
@@ -142,7 +142,7 @@ func TestRunNotify(t *testing.T) {
 	t.Setenv("LW_TEST_OUT", out)
 	script := `printf '%s|%s|%s|%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_FROM" "$LW_CHAT" "$LW_TYPE" "$LW_TEXT" "$LW_LINK" "$LW_MESSAGE" > "$LW_TEST_OUT"`
 
-	RunNotify(context.Background(), script, []Message{
+	RunNotify(context.Background(), t.TempDir(), script, []Message{
 		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat",
 			Link: "lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"},
 		{From: strPtr("张三"), Chat: strPtr("测试群"), Ctype: "group", Type: "text", Text: "帮我看个问题"},
@@ -259,42 +259,77 @@ func stubAlerter(t *testing.T, path string) {
 	t.Cleanup(func() { lookAlerter = old })
 }
 
-// alerter 草稿横幅：「发送」回调 send-draft、点正文 = 复制并跳转、60 秒超时；
-// 位置参数序与脚本引用一致；未安装 alerter 回退（ok=false）。
+// alerter 草稿横幅：动作下拉 = 发送＋常用语＋表情（内置默认），「发送」回调
+// send-draft、常用语回调 send-text、表情回调 react、点正文 = 复制并跳转、
+// 60 秒超时。标签与值全走位置参数（≥10 花括号），脚本文本零用户内容；
+// 未安装 alerter 回退（ok=false）。
 func TestAlerterDraftArgs(t *testing.T) {
 	stubAlerter(t, "/opt/bin/alerter")
-	script, args, ok := alerterDraftArgs("标题", "摘要", "lark://x", "草稿内容", "om_1")
+	// 空目录 = 内置默认动作：收到 / 好的，稍后回复 / 👍
+	script, args, ok := alerterDraftArgs(t.TempDir(), "标题", "摘要", "lark://x", "草稿内容", "om_1")
 	if !ok {
 		t.Fatal("want ok")
 	}
-	for _, want := range []string{`-actions "发送"`, `-closeLabel "忽略"`, "-timeout 60",
-		"send-draft --mid", "@CONTENTCLICKED", "pbcopy"} {
+	for _, want := range []string{
+		`-actions "$8"`, `-closeLabel "忽略"`, "-timeout 60",
+		`"发送") exec "$4" send-draft --mid "$5" ;;`,
+		`"$9") exec "$4" send-text --mid "$5" --text "${10}" ;;`,
+		`"${11}") exec "$4" send-text --mid "$5" --text "${12}" ;;`,
+		`"${13}") exec "$4" react --mid "$5" --emoji "${14}" ;;`,
+		"@CONTENTCLICKED", "pbcopy",
+	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
 		}
 	}
-	if len(args) != 7 || args[0] != "/opt/bin/alerter" || args[1] != "标题" ||
-		args[2] != "摘要\n\n—— 回复草稿 ——\n草稿内容" || args[4] != "om_1" ||
-		args[5] != "草稿内容" || args[6] != "lark://x" {
-		t.Errorf("args: %v", args)
+	if strings.Contains(script, "收到") || strings.Contains(script, "THUMBSUP") {
+		t.Errorf("script must not contain user content:\n%s", script)
+	}
+	want := []string{"/opt/bin/alerter", "标题", "摘要\n\n—— 回复草稿 ——\n草稿内容",
+		args[3], "om_1", "草稿内容", "lark://x", "发送,收到,好的，稍后回复,👍 回应",
+		"收到", "收到", "好的，稍后回复", "好的，稍后回复", "👍 回应", "THUMBSUP"}
+	if len(args) != len(want) {
+		t.Fatalf("args len %d, want %d: %v", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("args[%d] = %q, want %q", i, args[i], want[i])
+		}
 	}
 
 	stubAlerter(t, "")
-	if _, _, ok := alerterDraftArgs("t", "m", "l", "d", "om_1"); ok {
+	if _, _, ok := alerterDraftArgs(t.TempDir(), "t", "m", "l", "d", "om_1"); ok {
 		t.Error("no alerter should fall back to osascript")
 	}
 }
 
-// alerter 通用/VC 横幅：复制内容优先候选话术；VC 点正文或「加入」即入会。
+// alerter 通用/VC 横幅：有 mid 带快捷动作、无 mid 退回 plain 版（失败提示等
+// 无消息上下文场景）；复制内容优先候选话术；VC 点正文或「加入」即入会。
 func TestAlerterGenericVCArgs(t *testing.T) {
 	stubAlerter(t, "/opt/bin/alerter")
-	script, args, ok := alerterGenericArgs("t", "msg", "lark://x", "")
-	if !ok || !strings.Contains(script, `-actions "复制"`) || args[3] != "msg" {
-		t.Errorf("generic: ok=%v args=%v", ok, args)
+	dir := t.TempDir()
+	script, args, ok := alerterGenericArgs(dir, "t", "msg", "lark://x", "", "")
+	if !ok || script != alerterPlainScript || len(args) != 5 || args[3] != "msg" {
+		t.Errorf("no-mid generic: ok=%v script=%q args=%v", ok, script, args)
 	}
-	if _, args, _ := alerterGenericArgs("t", "msg", "", "话术"); args[3] != "话术" {
+	if _, args, _ := alerterGenericArgs(dir, "t", "msg", "", "话术", ""); args[3] != "话术" {
 		t.Errorf("draft should win copy text: %v", args)
 	}
+
+	script, args, ok = alerterGenericArgs(dir, "t", "msg", "lark://x", "", "om_9")
+	if !ok || len(args) != 14 || args[6] != "om_9" || args[7] != "复制,收到,好的，稍后回复,👍 回应" {
+		t.Fatalf("mid generic: ok=%v args=%v", ok, args)
+	}
+	for _, want := range []string{
+		`"复制") printf '%s' "$4" | pbcopy ;;`,
+		`"$9") exec "$6" send-text --mid "$7" --text "${10}" ;;`,
+		`"${13}") exec "$6" react --mid "$7" --emoji "${14}" ;;`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+
 	script, args, ok = alerterVCArgs("t", "msg", "lark://vc")
 	if !ok || !strings.Contains(script, `"加入"|"@CONTENTCLICKED"`) || args[3] != "lark://vc" {
 		t.Errorf("vc: ok=%v args=%v", ok, args)

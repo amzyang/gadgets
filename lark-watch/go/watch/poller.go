@@ -425,12 +425,12 @@ func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Mess
 	}
 	if notifyGraceSecs() <= 0 {
 		evlog.Info("notify.now", "n", len(rest), "mids", mids(rest))
-		go RunNotify(ctx, script, rest)
+		go RunNotify(ctx, p.Paths.ConfigDir, script, rest)
 		return
 	}
 	if err := p.Store.NotifyDeferPut(rest, now+notifyGraceSecs()); err != nil {
 		logf("notify defer failed, notifying now: %v", err)
-		go RunNotify(ctx, script, rest)
+		go RunNotify(ctx, p.Paths.ConfigDir, script, rest)
 	} else {
 		evlog.Info("notify.defer", "n", len(rest), "mids", mids(rest), "due", now+notifyGraceSecs())
 	}
@@ -451,7 +451,7 @@ func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 	script, enabled := LoadNotifyScript(p.Paths.ConfigDir)
 	evlog.Info("notify.flush", "n", len(batch), "mids", mids(batch), "script", script != "", "enabled", enabled)
 	if enabled {
-		go RunNotify(ctx, script, batch)
+		go RunNotify(ctx, p.Paths.ConfigDir, script, batch)
 	}
 }
 

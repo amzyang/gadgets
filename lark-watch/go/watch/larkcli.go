@@ -18,7 +18,8 @@ type LarkCLI interface {
 	Search(start, end string) ([]byte, error)
 	ChatList() ([]ChatMeta, error)
 	ChatMessages(cid, start string) ([]byte, error)
-	ReplyAsUser(mid, draft, format string) error
+	ReplyAsUser(mid, draft, format, idemKey string) error
+	ReactAsUser(mid, emojiType string) error
 	SendTextAsBot(userID, text string) error
 	SendCardToUser(userID, cardJSON string) error
 	UpdateCard(token, cardJSON string) error
@@ -182,17 +183,33 @@ func (c *ExecLarkCLI) ChatMessages(cid, start string) ([]byte, error) {
 
 // replyArgs 构造回复 argv：format=="markdown" 走 --markdown
 // （lark-cli 自动包装为 post 富文本），否则 --text 纯文本。
-func replyArgs(mid, draft, format string) []string {
+func replyArgs(mid, draft, format, idemKey string) []string {
 	flag := "--text"
 	if format == "markdown" {
 		flag = "--markdown"
 	}
 	return []string{"im", "+messages-reply", "--message-id", mid, "--as", "user",
-		"--idempotency-key", mid, flag, draft}
+		"--idempotency-key", idemKey, flag, draft}
 }
 
-func (c *ExecLarkCLI) ReplyAsUser(mid, draft, format string) error {
-	_, err := c.run(replyArgs(mid, draft, format)...)
+// ReplyAsUser 以用户身份回复消息。idemKey 由调用方定：卡片/弹窗「发送」用
+// mid（双端点击不双发），常用语快捷回复用独立键（不吞掉随后的正式回复）。
+func (c *ExecLarkCLI) ReplyAsUser(mid, draft, format, idemKey string) error {
+	_, err := c.run(replyArgs(mid, draft, format, idemKey)...)
+	return err
+}
+
+// ReactAsUser 以用户身份给消息加表情回应（OpenAPI 透传，lark-cli 无专用
+// 子命令；范式同 UpdateCard）。
+func (c *ExecLarkCLI) ReactAsUser(mid, emojiType string) error {
+	var payload struct {
+		ReactionType struct {
+			EmojiType string `json:"emoji_type"`
+		} `json:"reaction_type"`
+	}
+	payload.ReactionType.EmojiType = emojiType
+	_, err := c.run("api", "POST", "/open-apis/im/v1/messages/"+mid+"/reactions",
+		"--as", "user", "--data", encodeCompact(payload))
 	return err
 }
 

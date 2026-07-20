@@ -2,6 +2,8 @@ package watch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -172,7 +174,7 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 		evlog.Info("notify.claim", "mid", mid, "n", len(msgs), "script", script != "", "enabled", enabled)
 		if msgs = dropReplied(s, msgs); len(msgs) > 0 && enabled {
 			// 候选①与 pending 键随通知下发：弹窗「复制」给待发话术、「发送」直接回复。
-			StartNotify(context.Background(), script, msgs, drafts[0], mid)
+			StartNotify(context.Background(), paths.ConfigDir, script, msgs, drafts[0], mid)
 		}
 	} else {
 		evlog.Debug("notify.claim", "mid", mid, "n", 0) // 常态（已超时弹出/补课路径），降 debug
@@ -180,29 +182,80 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 	return nil
 }
 
+// 通知横幅/弹窗回调的子命令与 flag 名：main dispatch 与 notify.go 脚本模板
+// 共用（脚本里字面拼命令行，编译期无约束，常量即两侧契约）。
+const (
+	CmdSendDraft = "send-draft"
+	CmdSendText  = "send-text"
+	CmdReact     = "react"
+	FlagMid      = "mid"
+	FlagText     = "text"
+	FlagEmoji    = "emoji"
+)
+
 // RunSendDraft 是 send-draft 子命令入口（通知弹窗「发送」按钮的回调）：
 // 按 pending 里的候选直接以用户身份回复，语义与卡片「发送」一致（幂等键 =
 // 源消息 mid，弹窗/卡片双端点击也不会双发）。成功后删除 pending——其余候选
 // 随之失效，此后卡片按钮点击显示「已失效」（弹窗路径拿不到卡片回调 token，
 // 无法改卡完成态）。失败保留 pending 并弹错误提示（弹窗场景无终端可看，
 // 静默失败会让用户误以为已发出；提示弹窗 best-effort）。
-func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, mid string, idx int) error {
+func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid string, idx int) error {
 	drafts, format, _, ok := s.PendingGet(mid)
 	if !ok {
-		sendDraftAlertFn(ctx, "草稿已失效", "草稿不存在或已处理（可能已在卡片端发送/忽略）", "", "")
+		sendDraftAlertFn(ctx, paths.ConfigDir, "草稿已失效", "草稿不存在或已处理（可能已在卡片端发送/忽略）")
 		return fmt.Errorf("no pending draft for %s", mid)
 	}
 	if idx < 0 || idx >= len(drafts) {
 		return fmt.Errorf("draft idx %d out of range for %s (%d drafts)", idx, mid, len(drafts))
 	}
-	if err := cli.ReplyAsUser(mid, drafts[idx], format); err != nil {
+	if err := cli.ReplyAsUser(mid, drafts[idx], format, mid); err != nil {
 		evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", false)
-		sendDraftAlertFn(ctx, "回复发送失败", "草稿发送失败，请回终端或卡片处理", "", "")
+		sendDraftAlertFn(ctx, paths.ConfigDir, "回复发送失败", "草稿发送失败，请回终端或卡片处理")
 		return err
 	}
 	s.PendingDelete(mid)
 	evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", true)
 	logf("sent reply for %s (candidate %d, via popup)", mid, idx)
+	return nil
+}
+
+// quickIdemKey 是常用语快捷回复的幂等键：与卡片/弹窗「发送」的键（= mid）
+// 分离——共键会让服务端把后发的正式回复当重复吞掉；带文本哈希则同一条
+// 常用语连点仍防双发、不同常用语互不干扰。
+func quickIdemKey(mid, text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return mid + "-q-" + hex.EncodeToString(sum[:4])
+}
+
+// RunSendText 是 send-text 子命令入口（通知横幅常用语动作的回调）：
+// 以固定常用语纯文本回复源消息。成功后删除 pending（事已处理，草稿候选
+// 随之失效，与卡片「发送」语义一致；无 pending——即时/兜底通知场景——是
+// no-op）；失败保留 pending 并弹提示。
+func RunSendText(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid, text string) error {
+	if err := cli.ReplyAsUser(mid, text, "text", quickIdemKey(mid, text)); err != nil {
+		evlog.Info("popup.qreply", "mid", mid, "ok", false)
+		sendDraftAlertFn(ctx, paths.ConfigDir, "快捷回复失败", "常用语发送失败，请回终端或飞书处理")
+		return err
+	}
+	s.PendingDelete(mid)
+	evlog.Info("popup.qreply", "mid", mid, "ok", true)
+	logf("sent quick reply for %s", mid)
+	return nil
+}
+
+// RunReact 是 react 子命令入口（通知横幅表情动作的回调）：给源消息加表情
+// 回应。不动 pending——点赞不等于已回复，草稿仍可后续发送。
+func RunReact(ctx context.Context, cli LarkCLI, paths Paths, mid, emoji string) error {
+	if !emojiTypeRe.MatchString(emoji) {
+		return fmt.Errorf("invalid emoji type %q", emoji)
+	}
+	if err := cli.ReactAsUser(mid, emoji); err != nil {
+		evlog.Info("popup.react", "mid", mid, "emoji", emoji, "ok", false)
+		sendDraftAlertFn(ctx, paths.ConfigDir, "表情回应失败", "表情回应发送失败，请回飞书处理")
+		return err
+	}
+	evlog.Info("popup.react", "mid", mid, "emoji", emoji, "ok", true)
+	logf("reacted %s on %s", emoji, mid)
 	return nil
 }
 

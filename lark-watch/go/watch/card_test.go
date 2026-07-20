@@ -35,8 +35,15 @@ func (f *fakeCLI) ChatMessages(cid, start string) ([]byte, error) {
 func (f *fakeCLI) EventConsumeCmd(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, "false") // 测试不跑 consume 子进程
 }
-func (f *fakeCLI) ReplyAsUser(mid, draft, format string) error {
-	f.record("reply %s %s format=%s", mid, draft, format)
+func (f *fakeCLI) ReplyAsUser(mid, draft, format, idemKey string) error {
+	f.record("reply %s %s format=%s key=%s", mid, draft, format, idemKey)
+	if f.failReply {
+		return fmt.Errorf("api error")
+	}
+	return nil
+}
+func (f *fakeCLI) ReactAsUser(mid, emojiType string) error {
+	f.record("react %s %s", mid, emojiType)
 	if f.failReply {
 		return fmt.Errorf("api error")
 	}

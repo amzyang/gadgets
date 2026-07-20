@@ -85,7 +85,7 @@ func HandleCardEvent(s *Store, cli LarkCLI, self string, raw []byte, now int64) 
 			updateCard(doneStale, -1)
 			return
 		}
-		if err := cli.ReplyAsUser(act.Mid, drafts[act.Idx], format); err != nil {
+		if err := cli.ReplyAsUser(act.Mid, drafts[act.Idx], format, act.Mid); err != nil {
 			updateCard(doneFailed, -1)
 			cardLogf("reply failed for %s (pending kept): %v", act.Mid, err)
 			return

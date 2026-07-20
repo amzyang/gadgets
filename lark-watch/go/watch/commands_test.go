@@ -192,7 +192,7 @@ func stubSendDraftAlert(t *testing.T) *[]string {
 	t.Helper()
 	var alerts []string
 	old := sendDraftAlertFn
-	sendDraftAlertFn = func(_ context.Context, title, _, _, _ string) error {
+	sendDraftAlertFn = func(_ context.Context, _, title, _ string) error {
 		alerts = append(alerts, title)
 		return nil
 	}
@@ -208,10 +208,10 @@ func TestRunSendDraft(t *testing.T) {
 	stubSendDraftAlert(t)
 	s.PendingPut("om_p1", []string{"候选一", "候选二"}, "text", "{}", 1)
 
-	if err := RunSendDraft(context.Background(), s, cli, "om_p1", 0); err != nil {
+	if err := RunSendDraft(context.Background(), s, cli, Paths{ConfigDir: t.TempDir()}, "om_p1", 0); err != nil {
 		t.Fatal(err)
 	}
-	if !cli.hasCall("reply om_p1 候选一 format=text") {
+	if !cli.hasCall("reply om_p1 候选一 format=text key=om_p1") {
 		t.Errorf("reply args wrong: %v", cli.calls)
 	}
 	if _, _, _, ok := s.PendingGet("om_p1"); ok {
@@ -225,7 +225,8 @@ func TestRunSendDraftErrors(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	alerts := stubSendDraftAlert(t)
-	if err := RunSendDraft(context.Background(), s, cli, "om_none", 0); err == nil {
+	paths := Paths{ConfigDir: t.TempDir()}
+	if err := RunSendDraft(context.Background(), s, cli, paths, "om_none", 0); err == nil {
 		t.Error("missing pending should error")
 	}
 	if cli.hasCall("reply") {
@@ -233,11 +234,11 @@ func TestRunSendDraftErrors(t *testing.T) {
 	}
 
 	s.PendingPut("om_p2", []string{"候选一"}, "text", "{}", 1)
-	if err := RunSendDraft(context.Background(), s, cli, "om_p2", 1); err == nil {
+	if err := RunSendDraft(context.Background(), s, cli, paths, "om_p2", 1); err == nil {
 		t.Error("idx out of range should error")
 	}
 	cli.failReply = true
-	if err := RunSendDraft(context.Background(), s, cli, "om_p2", 0); err == nil {
+	if err := RunSendDraft(context.Background(), s, cli, paths, "om_p2", 0); err == nil {
 		t.Error("reply failure should propagate")
 	}
 	if _, _, _, ok := s.PendingGet("om_p2"); !ok {
@@ -245,6 +246,65 @@ func TestRunSendDraftErrors(t *testing.T) {
 	}
 	if len(*alerts) != 2 || (*alerts)[0] != "草稿已失效" || (*alerts)[1] != "回复发送失败" {
 		t.Errorf("alerts: %v", *alerts)
+	}
+}
+
+// send-text（横幅常用语回调）：独立幂等键（≠ mid、随文本互异）、成功删 pending。
+func TestRunSendText(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	stubSendDraftAlert(t)
+	s.PendingPut("om_q1", []string{"候选"}, "text", "{}", 1)
+	paths := Paths{ConfigDir: t.TempDir()}
+
+	if err := RunSendText(context.Background(), s, cli, paths, "om_q1", "收到"); err != nil {
+		t.Fatal(err)
+	}
+	key := quickIdemKey("om_q1", "收到")
+	if key == "om_q1" || key == quickIdemKey("om_q1", "好的") {
+		t.Errorf("idem key must differ from mid and vary by text: %s", key)
+	}
+	if !cli.hasCall("reply om_q1 收到 format=text key=" + key) {
+		t.Errorf("quick reply args wrong: %v", cli.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_q1"); ok {
+		t.Error("pending should be deleted after quick reply")
+	}
+
+	// 失败：pending 保留、错误上抛、弹提示
+	s.PendingPut("om_q2", []string{"候选"}, "text", "{}", 1)
+	cli.failReply = true
+	if err := RunSendText(context.Background(), s, cli, paths, "om_q2", "收到"); err == nil {
+		t.Error("reply failure should propagate")
+	}
+	if _, _, _, ok := s.PendingGet("om_q2"); !ok {
+		t.Error("pending must be kept after failed quick reply")
+	}
+}
+
+// react（横幅表情回调）：调 ReactAsUser、不碰 pending；坏 emoji type 拒绝。
+func TestRunReact(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	stubSendDraftAlert(t)
+	s.PendingPut("om_r1", []string{"候选"}, "text", "{}", 1)
+	paths := Paths{ConfigDir: t.TempDir()}
+
+	if err := RunReact(context.Background(), cli, paths, "om_r1", "THUMBSUP"); err != nil {
+		t.Fatal(err)
+	}
+	if !cli.hasCall("react om_r1 THUMBSUP") {
+		t.Errorf("react args wrong: %v", cli.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_r1"); !ok {
+		t.Error("react must not touch pending")
+	}
+	if err := RunReact(context.Background(), cli, paths, "om_r1", "bad; rm"); err == nil {
+		t.Error("invalid emoji type should be rejected")
+	}
+	cli.failReply = true
+	if err := RunReact(context.Background(), cli, paths, "om_r1", "OK"); err == nil {
+		t.Error("react failure should propagate")
 	}
 }
 
