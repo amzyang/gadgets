@@ -97,36 +97,52 @@ func loadPatterns(path string) []*regexp.Regexp {
 // 这类消息 content 常为空，豁免空文本丢弃。
 var vcTypes = map[string]bool{"video_chat": true, "vc_meeting": true}
 
-// Classify 对单条消息定级。返回 (打好 p 标签的消息, 是否保留)。
+// Classify 对单条消息定级。返回 (打好 p 标签的消息, 是否保留)，Reason 恒填
+// 判定理由（诊断日志用，json:"-" 不进事件流）。
 // 丢弃：自己发的 / 非 user 发送者 / 空文本（音视频会议除外）/ ignore 命中
 // （ignore 可压掉 P0）。
 // P0：音视频会议、p2p、@我（mentions 命中 self，或预渲染 content 的
 // <at user_id="self"> 标记；@all 不算）、watchlist（重点人/群/名称精确匹配）、
-// 关键词命中；其余 P1。
+// 关键词命中；其余 P1。判据顺序即 Reason 归因顺序（首个命中者胜出）。
 func (r Rules) Classify(m Message) (Message, bool) {
-	if m.Fid == r.Self || m.Ftype != "user" || (m.Text == "" && !vcTypes[m.Type]) {
+	switch {
+	case m.Fid == r.Self:
+		m.Reason = "self"
+		return m, false
+	case m.Ftype != "user":
+		m.Reason = "non-user"
+		return m, false
+	case m.Text == "" && !vcTypes[m.Type]:
+		m.Reason = "empty"
 		return m, false
 	}
 	blob := m.Cid + " " + deref(m.Chat) + " " + deref(m.From) + " " + m.Text
 	for _, re := range r.Ignore {
 		if re.MatchString(blob) {
+			m.Reason = "ignore:" + re.String()
 			return m, false
 		}
 	}
-	m.P = "P1"
-	if vcTypes[m.Type] ||
-		m.Ctype == "p2p" ||
-		slices.Contains(m.AtIDs, r.Self) ||
-		strings.Contains(m.Text, `<at user_id="`+r.Self+`"`) ||
-		r.WatchUsers[m.Fid] ||
-		r.WatchChats[m.Cid] ||
-		r.WatchNames[deref(m.From)] ||
-		r.WatchNames[deref(m.Chat)] {
-		m.P = "P0"
-	} else {
+	m.P = "P0"
+	switch {
+	case vcTypes[m.Type]:
+		m.Reason = "vc"
+	case m.Ctype == "p2p":
+		m.Reason = "p2p"
+	case slices.Contains(m.AtIDs, r.Self) ||
+		strings.Contains(m.Text, `<at user_id="`+r.Self+`"`):
+		m.Reason = "at-me"
+	case r.WatchUsers[m.Fid]:
+		m.Reason = "watch-user"
+	case r.WatchChats[m.Cid]:
+		m.Reason = "watch-chat"
+	case r.WatchNames[deref(m.From)] || r.WatchNames[deref(m.Chat)]:
+		m.Reason = "watch-name"
+	default:
+		m.P, m.Reason = "P1", "p1"
 		for _, re := range r.Keywords {
 			if re.MatchString(m.Text) {
-				m.P = "P0"
+				m.P, m.Reason = "P0", "keyword:"+re.String()
 				break
 			}
 		}
@@ -147,15 +163,17 @@ func SelfLastTimes(msgs []Message, self string) map[string]string {
 	return out
 }
 
-// ClassifyAll 批量定级，仅保留通过的消息。
-func (r Rules) ClassifyAll(msgs []Message) []Message {
-	out := make([]Message, 0, len(msgs))
+// ClassifyAll 批量定级：kept 已打 p 标签，dropped 带丢弃 Reason（供诊断日志）。
+func (r Rules) ClassifyAll(msgs []Message) (kept, dropped []Message) {
+	kept = make([]Message, 0, len(msgs))
 	for _, m := range msgs {
 		if tagged, keep := r.Classify(m); keep {
-			out = append(out, tagged)
+			kept = append(kept, tagged)
+		} else {
+			dropped = append(dropped, tagged)
 		}
 	}
-	return out
+	return kept, dropped
 }
 
 func deref(s *string) string {

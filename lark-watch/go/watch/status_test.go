@@ -2,6 +2,7 @@ package watch
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestBuildStatusAuthOK(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	cli := &authFake{info: AuthInfo{OpenID: "ou_x", RefreshExpiresAt: now.Add(48 * time.Hour)}}
 
-	st := buildStatus(s, cli, now)
+	st := buildStatus(s, cli, Paths{}, now)
 	if !st.AuthOK {
 		t.Fatal("want auth_ok true")
 	}
@@ -38,7 +39,7 @@ func TestBuildStatusAuthExpiring(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	cli := &authFake{info: AuthInfo{OpenID: "ou_x", RefreshExpiresAt: now.Add(2 * time.Hour)}}
 
-	st := buildStatus(s, cli, now)
+	st := buildStatus(s, cli, Paths{}, now)
 	if !st.AuthOK {
 		t.Fatal("want auth_ok true")
 	}
@@ -51,7 +52,7 @@ func TestBuildStatusRestricted(t *testing.T) {
 	s := openTestStore(t)
 	s.RestrictedSet("oc_r", "产品技术部", 1000)
 
-	st := buildStatus(s, &authFake{info: AuthInfo{OpenID: "ou_x"}}, time.Unix(2000, 0))
+	st := buildStatus(s, &authFake{info: AuthInfo{OpenID: "ou_x"}}, Paths{}, time.Unix(2000, 0))
 	if len(st.RestrictedChats) != 1 {
 		t.Fatalf("restricted chats: %+v", st.RestrictedChats)
 	}
@@ -61,11 +62,29 @@ func TestBuildStatusRestricted(t *testing.T) {
 	}
 }
 
+// status 暴露事件日志路径（skill 据此定位诊断文件）；LW_EVENT_LOG=0 时缺省。
+func TestBuildStatusEventLog(t *testing.T) {
+	s := openTestStore(t)
+	dir := t.TempDir()
+	paths := Paths{StateDir: dir}
+	cli := &authFake{info: AuthInfo{OpenID: "ou_x"}}
+
+	st := buildStatus(s, cli, paths, time.Unix(2000, 0))
+	if st.EventLog != filepath.Join(dir, "events.log") {
+		t.Fatalf("event_log: got %q", st.EventLog)
+	}
+
+	t.Setenv("LW_EVENT_LOG", "0")
+	if st := buildStatus(s, cli, paths, time.Unix(2000, 0)); st.EventLog != "" {
+		t.Fatalf("disabled event_log should be empty (omitempty), got %q", st.EventLog)
+	}
+}
+
 func TestBuildStatusAuthFailed(t *testing.T) {
 	s := openTestStore(t)
 	cli := &authFake{err: errors.New("token expired")}
 
-	st := buildStatus(s, cli, time.Unix(1_700_000_000, 0))
+	st := buildStatus(s, cli, Paths{}, time.Unix(1_700_000_000, 0))
 	if st.AuthOK {
 		t.Fatal("want auth_ok false")
 	}

@@ -74,6 +74,11 @@ stdout 每行一个 JSON 事件，`p` 字段区分类型。**判断权在模型*
 已自动抑制。默认安静跳过——不起草，转述至多一句带过；仅当正文明显仍需
 单独回应时照常处理。
 
+事件积压：事件是串行处理的，一次唤醒可能带多行积压事件，轮到某条时会话可能
+已翻篇（`replied` 是事件产生时刻的快照，会过期）。同 cid 的多条 P0 只处理
+最新一条，更早的视为被取代、并入转述一句带过；事件 `t` 明显落后当前时间
+（正在消化积压）时，先按第 2 步核对会话最新状态再决定起草与催促。
+
 `type` 为 `video_chat`/`vc_meeting`（发起或分享视频/语音会议）时 `text` 常为空：
 这类事件实时性最强（不聚合、不带 replied），跳过细判与草稿，立即转述
 「谁在哪发起了会议」+ `link` 让用户点击加入。系统侧已弹出专用「忽略/加入」
@@ -86,6 +91,8 @@ stdout 每行一个 JSON 事件，`p` 字段区分类型。**判断权在模型*
    `lark-cli im +chat-messages-list --chat-id <cid> --page-size 10 --no-reactions --format json`
    线程消息用 `+threads-messages-list --thread <omt_>`。阅读时区分本人发言
    （sender id 为自己的 open_id），别把他人的话当成自己的承诺。
+   若列表显示本人在该事件消息之后已有发言，视同 `replied:true`：安静跳过，
+   不起草不发卡——用户已亲自处理，任何草稿和催促都是打扰。
    消息含图（`type` 为 `image`、`post` 带 image 块，或正文/相邻消息提到
    附图/截图/如图）时必须先下载真看再细判：从上述消息列表的 content 里取
    `image_key`，执行
@@ -146,6 +153,9 @@ stdout 每行一个 JSON 事件，`p` 字段区分类型。**判断权在模型*
    - 表态门禁场景：写明求证结论——「已核对本会话前文/归档/代码 ✓，依据是…」
      或「未能验证对方建议合理性，表态留给你」。
    没有洞察就不硬写，只给分类+草稿。
+   「建议尽快回复」类时间敏感催促，仅当事件未标 replied **且**本轮已核对过
+   会话最新状态（第 2 步拉过消息列表）时才可写；没核对就只转述不催——积压时
+   事件快照常已过期，催用户回一条他早已回过的消息只会消耗信任。
 6. **默认发确认卡片**：展示的同时立即用 `send-card` 把草稿（全部候选）发成确认
    卡片（见下「卡片确认」），用户在飞书/手机点任一候选的「发送」即确认；终端确认
    仍然可用，两端任一确认即发送。终端路径确认后执行：
@@ -346,8 +356,18 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
 ## 状态与排错
 
 - 状态库：`~/.local/state/lark-watch/lark-watch.db`（SQLite，`sqlite3` 可直接查；
-  表：meta/seen/handled/processed/fetched/pending/digest_buf/catchup_last/restricted）。
-  同目录 `*.imported` 是 bash 时代的留档，可忽略。
+  表：meta/seen/handled/processed/fetched/pending/notify_wait/digest_buf/
+  catchup_last/restricted/chat_state）。同目录 `*.imported` 是 bash 时代的
+  留档，可忽略。
+- 事件诊断日志：`~/.local/state/lark-watch/events.log`（NDJSON，默认开启，路径
+  见 `status` 输出的 `event_log` 字段）。每条消息的判定（`msg.keep`/`msg.drop`
+  的 `reason`：p2p/at-me/keyword:…/ignore:…/self 等）、tick 摘要、stdout 事件
+  （`emit`）、通知链路（`notify.defer/flush/claim/replied/skip`）、卡片动作
+  （`card.action`）与全部 stderr 诊断文本都在里面。排查「这条消息为什么推了/
+  没推」按 mid grep：`grep om_xxx events.log | jq .`。超 10MB 轮转为
+  `events.log.1`（各留一代）。`LW_EVENT_LOG=0` 关闭、`LW_EVENT_LOG_LEVEL=debug`
+  加记重复拉取、安静 tick 与本人消息丢弃（reason=self 默认不落盘）、
+  `LW_EVENT_LOG_MAX_MB` 调上限。
 - 健康检查：`{SKILL_DIR}/bin/lark-watch status`。`restricted_chats` 非空表示
   这些群开启了防泄密模式、监控无法覆盖（见「alert / Monitor 退出」的
   `kind:"restricted"`）。

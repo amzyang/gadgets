@@ -258,6 +258,25 @@ func TestCardSendFailureKeepsPending(t *testing.T) {
 	}
 }
 
+// 卡片回调动作留痕（action/mid/idx/event_id 可与 msg.keep、send-card 对上）。
+func TestHandleCardEventLogsAction(t *testing.T) {
+	logs := captureEvlog(t)
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_log", []string{"候选A", "候选B"}, "text", testCardContent, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEventIdx("e20", "tok20", "send", "om_log", 1), 100)
+
+	recs := findLogs(logs(), "card.action")
+	if len(recs) != 1 {
+		t.Fatalf("want 1 card.action, got %v", recs)
+	}
+	r := recs[0]
+	if r["action"] != "send" || r["mid"] != "om_log" || r["idx"] != float64(1) || r["event_id"] != "e20" {
+		t.Errorf("card.action attrs: %v", r)
+	}
+}
+
 func TestRenderDraftCard(t *testing.T) {
 	card := RenderDraftCard("om_x", "私聊", "张三", "12:03",
 		`<at user_id="ou_1">邹洋</at> 帮我看下 *这个* <方案>`, []string{"好的，```稍后```回复"}, "text", "")

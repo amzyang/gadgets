@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg
 CREATE TABLE IF NOT EXISTS notify_wait (mid TEXT PRIMARY KEY, cid TEXT NOT NULL, msg TEXT NOT NULL, due INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS chat_state (cid TEXT PRIMARY KEY, self_last TEXT NOT NULL);
 `
 
 func OpenStore(stateDir string) (*Store, error) {
@@ -320,6 +321,48 @@ func (s *Store) RestrictedList() ([]RestrictedChat, error) {
 	return out, rows.Err()
 }
 
+// ---------- chat_state（per-chat 本人最新发言时间：replied 判据的持久化信号源）----------
+// 行数 = 本人发过言的会话数（与 fetched/processed 同量级），不设清理——rowid 裁剪
+// 不适用于 PK-upsert 表，裁掉只会退化 replied 判断。
+
+// SelfLastUpsert 批量落盘本人每会话最新发言时间（minuteLayout 字符串，可直接比较）。
+// 只增不减：新值严格大于旧值才更新——回看窗口的重复重放天然幂等。
+func (s *Store) SelfLastUpsert(times map[string]string) error {
+	if len(times) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for cid, t := range times {
+		if _, err := tx.Exec(
+			`INSERT INTO chat_state(cid, self_last) VALUES(?, ?)
+			 ON CONFLICT(cid) DO UPDATE SET self_last = excluded.self_last
+			 WHERE excluded.self_last > chat_state.self_last`,
+			cid, t); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// SelfLast 按 cid 集合读取持久化的本人最新发言时间；任何失败返回已读到的部分
+// （fail-open：判不出「已回复」就照常通知，宁可多提醒不可漏——与 shouldSuppressNotify
+// 同哲学）。调用侧 cid 数是单 tick 的会话数，个位数常态，逐条查询足够。
+func (s *Store) SelfLast(cids []string) map[string]string {
+	out := map[string]string{}
+	for _, cid := range cids {
+		var t string
+		if err := s.db.QueryRow(
+			`SELECT self_last FROM chat_state WHERE cid = ?`, cid).Scan(&t); err == nil {
+			out[cid] = t
+		}
+	}
+	return out
+}
+
 // ---------- pending（卡片草稿候选+卡片原稿）----------
 
 // PendingPut 落盘草稿候选（len(drafts) >= 1 由调用方保证）：候选 0 进 draft 列，
@@ -375,8 +418,10 @@ func (s *Store) NotifyDeferPut(msgs []Message, due int64) error {
 	return tx.Commit()
 }
 
-// NotifyDeferTakeDue 取出并删除全部到期条目（同一事务；与 NotifyDeferClaimChat
-// 靠事务互斥，poller 兜底与 send-card 认领不会重复通知同一条）。
+// NotifyDeferTakeDue 取出并删除含到期条目的会话的全部条目（同一事务；与
+// NotifyDeferClaimChat 靠事务互斥，poller 兜底与 send-card 认领不会重复通知
+// 同一条）。会话级而非条目级：同 cid 跨 tick 积压一次合并释放（后到条目提前
+// 弹出），对齐 ClaimChat 语义——避免同会话几十秒内二次弹已过时的旧内容。
 func (s *Store) NotifyDeferTakeDue(now int64) ([]Message, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -384,14 +429,17 @@ func (s *Store) NotifyDeferTakeDue(now int64) ([]Message, error) {
 	}
 	defer tx.Rollback()
 	out, err := notifyWaitScan(tx.Query(
-		`SELECT msg FROM notify_wait WHERE due <= ? ORDER BY rowid`, now))
+		`SELECT msg FROM notify_wait
+		 WHERE cid IN (SELECT cid FROM notify_wait WHERE due <= ?) ORDER BY rowid`, now))
 	if err != nil {
 		return nil, err
 	}
 	if len(out) == 0 {
 		return nil, nil
 	}
-	if _, err := tx.Exec(`DELETE FROM notify_wait WHERE due <= ?`, now); err != nil {
+	if _, err := tx.Exec(
+		`DELETE FROM notify_wait
+		 WHERE cid IN (SELECT cid FROM notify_wait WHERE due <= ?)`, now); err != nil {
 		return nil, err
 	}
 	return out, tx.Commit()

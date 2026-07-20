@@ -55,6 +55,10 @@ func daemonCtx() context.Context {
 }
 
 func dispatch(cmd string, args []string) error {
+	// 事件诊断日志对全部子命令统一开启（默认开，LW_EVENT_LOG=0 关闭）：
+	// 守护进程与短命令（send-card/status 等）并发追加同一文件，O_APPEND 保序。
+	closeEvlog := watch.InitEventLog(watch.DefaultPaths().StateDir)
+	defer closeEvlog()
 	cli := &watch.ExecLarkCLI{}
 	switch cmd {
 	case "run", "poll":
@@ -156,7 +160,7 @@ func dispatch(cmd string, args []string) error {
 			return err
 		}
 		defer s.Close()
-		return watch.RunStatus(s, cli)
+		return watch.RunStatus(s, cli, watch.DefaultPaths())
 
 	default:
 		usage()

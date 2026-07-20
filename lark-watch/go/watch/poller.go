@@ -71,7 +71,10 @@ func (p *Poller) now() int64 {
 	return time.Now().Unix()
 }
 
-func (p *Poller) emit(v any) { p.Out(EncodeLine(v)) }
+func (p *Poller) emit(v any) {
+	p.Out(EncodeLine(v))
+	logEmit(v)
+}
 
 // Run 阻塞运行直到 ctx 取消；取消时 flush 摘要缓冲。
 // 返回 error 仅在不可恢复（auth 失效）时。
@@ -155,6 +158,7 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 // tick 执行一轮拉取：chat-list 活跃降序遍历 + 逐会话增量，外加低频 search 兜底。
 // 返回 error 仅当 chat-list 失败（单会话失败只记日志、游标不动，下 tick 重试）。
 func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
+	start := time.Now() // 摘要耗时用真实时钟（p.Now 是测试注入的逻辑时钟）
 	s := p.Store
 	chats, err := p.CLI.ChatList()
 	if err != nil {
@@ -165,10 +169,19 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 	// p0 = 本 tick 全部 P0（通知批次）；p0Buf = 待聚合发射的 P0（不含音视频会议）；
 	// selfLast = 本批增量里本人发言的每会话最新时间（replied 注记信号源）
 	var p0, p1, p0Buf []Message
+	var dups int
+	searchRan := false
 	selfLast := map[string]string{}
 	// 任何返回路径（含中途 auth 失败）前先清算缓冲：collect 已把 mid 写入
 	// seen，若不发射即返回，重启后被当重复过滤，消息永久丢失。
 	defer func() {
+		// 先把本 tick 观察到的本人发言持久化，再回读合并历史值：replied 判据从
+		// 「本 tick 的 90s 回看窗口」扩展到跨 tick——晚浮现的旧消息（search 兜底、
+		// has_more 续拉）也能正确注记/抑制。任一步失败退回纯内存判据（行为不变）。
+		if err := s.SelfLastUpsert(selfLast); err != nil {
+			logf("self_last upsert failed: %v", err)
+		}
+		mergeSelfLast(selfLast, s.SelfLast(uniqueCids(p0)))
 		// 同会话聚合 + replied 注记后统一发射（音视频会议已在 collect 内即时单发）
 		for _, ev := range MarkReplied(GroupP0(p0Buf), selfLast) {
 			p.emit(ev)
@@ -179,19 +192,54 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 		// 通知命令：每 tick 的 P0 批次聚合为一次调用（避免弹窗轰炸），异步不阻塞轮询；
 		// 本人已回复的不打扰（音视频会议豁免）。需要起草的 P0 延迟到草稿就绪后展示，
 		// 音视频会议走专用弹窗路径即时弹（见 dispatchNotify）。
-		if batch := notifyBatch(p0, selfLast); len(batch) > 0 {
+		batch := notifyBatch(p0, selfLast)
+		if n := len(p0) - len(batch); n > 0 {
+			evlog.Info("notify.replied", "n", n)
+		}
+		if len(batch) > 0 {
 			if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
 				p.dispatchNotify(ctx, script, batch, nowEpoch)
+			} else {
+				evlog.Info("notify.skip", "reason", "no-script", "n", len(batch))
 			}
+		}
+		// tick 摘要：有动静（新消息 / search 兜底）记 Info，安静 tick 降 Debug
+		attrs := []any{"chats", len(chats), "new", len(p0) + len(p1), "p0", len(p0),
+			"p1", len(p1), "dup", dups, "search", searchRan, "ms", time.Since(start).Milliseconds()}
+		if len(p0)+len(p1) > 0 || searchRan {
+			evlog.Info("tick", attrs...)
+		} else {
+			evlog.Debug("tick", attrs...)
 		}
 	}()
 	collect := func(msgs []Message) error {
 		mergeSelfLast(selfLast, SelfLastTimes(msgs, rules.Self))
-		fresh, err := s.FilterNewMessages(rules.ClassifyAll(msgs), nowEpoch, SeenMax())
+		kept, dropped := rules.ClassifyAll(msgs)
+		for _, m := range dropped {
+			if m.Reason == "self" {
+				evlog.Debug("msg.drop", msgAttrs(m)...) // 大宗噪音（回看窗口内每 tick 重复），降 debug
+			} else {
+				evlog.Info("msg.drop", msgAttrs(m)...) // ignore/empty/non-user：诊断价值高，重复可接受
+			}
+		}
+		fresh, err := s.FilterNewMessages(kept, nowEpoch, SeenMax())
 		if err != nil {
 			return err
 		}
+		if len(fresh) < len(kept) {
+			dups += len(kept) - len(fresh)
+			freshSet := make(map[string]bool, len(fresh))
+			for _, m := range fresh {
+				freshSet[m.Mid] = true
+			}
+			for _, m := range kept {
+				if !freshSet[m.Mid] {
+					evlog.Debug("msg.dup", "mid", m.Mid, "cid", m.Cid)
+				}
+			}
+		}
 		for _, m := range fresh {
+			evlog.Info("msg.keep", append(msgAttrs(m), "p", m.P)...) // 去重之后才记：只留真正新消息
 			switch {
 			case m.P != "P0":
 				p1 = append(p1, m)
@@ -268,6 +316,7 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 
 	// search 兜底对账：捞回 early-stop/active_time 排序理论上可能漏的，mid 去重天然合并
 	if p.tickN%searchEveryN() == 0 {
+		searchRan = true
 		cursor, _ := s.MetaGetInt("cursor")
 		raw, err := p.CLI.Search(fmtTS(cursor-searchLookback), fmtTS(nowEpoch))
 		if err != nil {
@@ -369,33 +418,40 @@ func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Mess
 		}
 	}
 	if len(vc) > 0 {
+		evlog.Info("notify.vc", "n", len(vc), "mids", mids(vc))
 		go RunNotifyVC(ctx, p.Paths, vc)
 	}
 	if len(rest) == 0 {
 		return
 	}
 	if notifyGraceSecs() <= 0 {
+		evlog.Info("notify.now", "n", len(rest), "mids", mids(rest))
 		go RunNotify(ctx, script, rest)
 		return
 	}
 	if err := p.Store.NotifyDeferPut(rest, now+notifyGraceSecs()); err != nil {
 		logf("notify defer failed, notifying now: %v", err)
 		go RunNotify(ctx, script, rest)
+	} else {
+		evlog.Info("notify.defer", "n", len(rest), "mids", mids(rest), "due", now+notifyGraceSecs())
 	}
 }
 
-// flushDueNotify 释放到期未被 send-card 认领的延迟通知，内容与即时通知
-// 完全一致，只是晚到。脚本已被删除（通知被关闭）时到期条目直接丢弃。
+// flushDueNotify 释放到期未被 send-card 认领的延迟通知，内容与即时通知一致，
+// 只是晚到——且释放前复核已回复（等待期内本人亲自回复的不再弹）。脚本已被
+// 删除（通知被关闭）时到期条目直接丢弃。
 func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 	batch, err := p.Store.NotifyDeferTakeDue(now)
 	if err != nil {
 		logf("notify defer take failed: %v", err)
 		return
 	}
-	if len(batch) == 0 {
+	if batch = dropReplied(p.Store, batch); len(batch) == 0 {
 		return
 	}
-	if script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify")); script != "" {
+	script := ReadNotifyScript(filepath.Join(p.Paths.ConfigDir, "notify"))
+	evlog.Info("notify.flush", "n", len(batch), "mids", mids(batch), "script", script != "")
+	if script != "" {
 		go RunNotify(ctx, script, batch)
 	}
 }
@@ -407,6 +463,45 @@ func mergeSelfLast(acc, batch map[string]string) {
 			acc[cid] = t
 		}
 	}
+}
+
+// uniqueCids 按首见序提取消息批次的去重 cid 列表。
+func uniqueCids(msgs []Message) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		if !seen[m.Cid] {
+			seen[m.Cid] = true
+			out = append(out, m.Cid)
+		}
+	}
+	return out
+}
+
+// dropReplied 在延迟通知释放前用持久化 self_last 复核「已回复」：入队时的判断
+// 在等待期（send-card 认领或超时兜底）内会过期——本人已亲自回复的不再弹、更
+// 不该催。判据复用 selfRepliedAfter（严格大于，分钟精度，同分钟不抑制），与
+// 入队侧 notifyBatch 完全一致，两侧不分叉。读库失败 fail-open 全量放行（宁可
+// 多提醒不可漏）。VC 不入延迟队列（dispatchNotify 分流），无需豁免分支；
+// notify_wait 只存单条消息（GroupP0 仅作用于事件发射链路），逐条按自身 T 判定。
+func dropReplied(s *Store, msgs []Message) []Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+	selfLast := s.SelfLast(uniqueCids(msgs))
+	out := make([]Message, 0, len(msgs))
+	var dropped []Message
+	for _, m := range msgs {
+		if selfRepliedAfter(selfLast, m.Cid, m.T) {
+			dropped = append(dropped, m)
+			continue
+		}
+		out = append(out, m)
+	}
+	if len(dropped) > 0 {
+		evlog.Info("notify.drop_replied", "n", len(dropped), "mids", mids(dropped))
+	}
+	return out
 }
 
 // markRestricted 持久标记防泄密群；仅首次检测告警（重探失败只刷新时间戳）。

@@ -50,6 +50,7 @@ func waitForFile(t *testing.T, path string) []byte {
 
 // send-card 发卡后释放同会话的延迟通知：脚本收到聚合摘要，条目被认领清空。
 func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
+	logs := captureEvlog(t)
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	rang := stubBell(t)
@@ -79,10 +80,16 @@ func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 	if _, ok := s.NotifyDeferClaimChat("om_1"); ok {
 		t.Error("deferred entries should be claimed and cleared")
 	}
+	claims := findLogs(logs(), "notify.claim")
+	if len(claims) != 1 || claims[0]["mid"] != "om_2" || claims[0]["n"] != float64(2) ||
+		claims[0]["script"] != true || claims[0]["level"] != "INFO" {
+		t.Errorf("notify.claim: %v", claims)
+	}
 }
 
 // 发卡时无延迟条目（已超时弹出/未配置延迟）：不弹通知、不响铃。
 func TestRunSendCardNoDeferredNotify(t *testing.T) {
+	logs := captureEvlog(t)
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	rang := stubBell(t)
@@ -103,6 +110,76 @@ func TestRunSendCardNoDeferredNotify(t *testing.T) {
 	}
 	if rang.Load() != 0 {
 		t.Errorf("bell rang %d times, want 0", rang.Load())
+	}
+	claims := findLogs(logs(), "notify.claim")
+	if len(claims) != 1 || claims[0]["n"] != float64(0) || claims[0]["level"] != "DEBUG" {
+		t.Errorf("no-claim should log at DEBUG: %v", claims)
+	}
+}
+
+// 发卡认领时本人已亲自回复：卡片照发（草稿仍有参考价值）、条目认领清空，
+// 但系统通知不再弹——等草稿期间会话可能已被本人处理，弹旧通知只会误导。
+func TestRunSendCardSkipsRepliedNotify(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	rang := stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	dir := t.TempDir()
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, dir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	s.NotifyDeferPut([]Message{
+		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_1", Type: "text", Text: "在吗", T: "2026-07-17 12:00"},
+		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_2", Type: "text", Text: "必须是这个", T: "2026-07-17 12:01"},
+	}, 99999)
+	s.SelfLastUpsert(map[string]string{"oc_a": "2026-07-17 12:02"})
+
+	draft := filepath.Join(dir, "d.md")
+	os.WriteFile(draft, []byte("好的"), 0o644)
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, "必须是这个", "张三", "私聊", "12:01", "text", ""); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(out); err == nil {
+		t.Error("notify ran for replied chat, want dropped")
+	}
+	if rang.Load() != 0 {
+		t.Errorf("bell rang %d times, want 0", rang.Load())
+	}
+	if !cli.hasCall("send-card ou_SELF") {
+		t.Errorf("card must still be sent: %v", cli.calls)
+	}
+	if _, ok := s.NotifyDeferClaimChat("om_1"); ok {
+		t.Error("deferred entries should be claimed and cleared")
+	}
+}
+
+// 认领批次部分过期：只弹本人回复之后到达的那条，之前的丢弃。
+func TestRunSendCardDropsRepliedKeepsNewer(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	rang := stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	dir := t.TempDir()
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, dir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	s.NotifyDeferPut([]Message{
+		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_1", Type: "text", Text: "在吗", T: "2026-07-17 12:00"},
+		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_2", Type: "text", Text: "必须是这个", T: "2026-07-17 12:02"},
+	}, 99999)
+	s.SelfLastUpsert(map[string]string{"oc_a": "2026-07-17 12:01"})
+
+	draft := filepath.Join(dir, "d.md")
+	os.WriteFile(draft, []byte("好的"), 0o644)
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, "必须是这个", "张三", "私聊", "12:02", "text", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(waitForFile(t, out)); got != "张三（私聊）: 必须是这个" {
+		t.Errorf("notify message: got %q", got)
+	}
+	if rang.Load() != 1 {
+		t.Errorf("bell rang %d times, want 1", rang.Load())
 	}
 }
 

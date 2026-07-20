@@ -77,7 +77,8 @@ func RunCatchup(s *Store, cli LarkCLI, paths Paths, since string, peek int) erro
 		cursorMinutes[cid] = FmtMinute(at)
 	}
 
-	result := CatchupGroup(rules.ClassifyAll(msgs), cursorMinutes, FmtMinute(floorEpoch), peek, hasMore)
+	kept, _ := rules.ClassifyAll(msgs)
+	result := CatchupGroup(kept, cursorMinutes, FmtMinute(floorEpoch), peek, hasMore)
 	os.Stdout.Write(EncodeLine(result))
 
 	cids := make([]string, 0, len(result.Chats))
@@ -164,21 +165,27 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 	logf("draft card sent for %s", mid)
 	// 草稿已就绪：认领并展示同会话被延迟的系统通知。查无延迟条目
 	// （已超时弹出 / 未配置通知 / 补课路径）则静默跳过，不会重复弹。
+	// 等草稿期间本人已亲自回复的也不再弹（卡片照发——草稿仍可能有参考
+	// 价值，只是不该再催）；chat_state 经 SQLite WAL 跨进程读 daemon 落盘值。
 	if msgs, ok := s.NotifyDeferClaimChat(mid); ok {
-		if script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify")); script != "" {
+		script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify"))
+		evlog.Info("notify.claim", "mid", mid, "n", len(msgs), "script", script != "")
+		if msgs = dropReplied(s, msgs); len(msgs) > 0 && script != "" {
 			StartNotify(context.Background(), script, msgs)
 		}
+	} else {
+		evlog.Debug("notify.claim", "mid", mid, "n", 0) // 常态（已超时弹出/补课路径），降 debug
 	}
 	return nil
 }
 
 // RunStatus 输出健康 JSON（含 auth 状态，心跳检查只看这一份输出）。
-func RunStatus(s *Store, cli LarkCLI) error {
-	os.Stdout.Write(EncodeLine(buildStatus(s, cli, time.Now())))
+func RunStatus(s *Store, cli LarkCLI, paths Paths) error {
+	os.Stdout.Write(EncodeLine(buildStatus(s, cli, paths, time.Now())))
 	return nil
 }
 
-func buildStatus(s *Store, cli LarkCLI, now time.Time) Status {
+func buildStatus(s *Store, cli LarkCLI, paths Paths, now time.Time) Status {
 	heartbeat, _ := s.MetaGetInt("heartbeat")
 	cursor, _ := s.MetaGetInt("cursor")
 	lastFlush, _ := s.MetaGetInt("last_flush")
@@ -192,6 +199,9 @@ func buildStatus(s *Store, cli LarkCLI, now time.Time) Status {
 		DigestBuffered: s.DigestCount(), LastFlush: lastFlush,
 	}
 	st.RestrictedChats, _ = s.RestrictedList()
+	if eventLogEnabled() {
+		st.EventLog = eventLogPath(paths.StateDir)
+	}
 	auth, err := cli.AuthSelf()
 	if err != nil {
 		st.AuthWarning = authAlertMsg(err)

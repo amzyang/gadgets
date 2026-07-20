@@ -160,12 +160,73 @@ func TestClassify(t *testing.T) {
 				ig = writeConfig(t, dir, tc.name+".ignore", tc.ignore)
 			}
 			rules := LoadRules("ou_SELF", wl, kw, ig)
-			assertGolden(t, tc.expected, encodeAll(rules.ClassifyAll(input)))
+			kept, _ := rules.ClassifyAll(input)
+			assertGolden(t, tc.expected, encodeAll(kept))
 		})
 	}
 }
 
 func strPtr(s string) *string { return &s }
+
+// Classify 判定理由全词表覆盖（诊断日志 msg.keep/msg.drop 的 reason 字段来源）。
+func TestClassifyReason(t *testing.T) {
+	dir := t.TempDir()
+	wl := writeConfig(t, dir, "watchlist", "ou_vip\noc_vip\n王总\n")
+	kw := writeConfig(t, dir, "keywords", "开会\n")
+	ig := writeConfig(t, dir, "ignore", "吃什么\n")
+	rules := LoadRules("ou_SELF", wl, kw, ig)
+
+	base := Message{Mid: "om_r", Cid: "oc_x", Ctype: "group", Chat: strPtr("普通群"),
+		From: strPtr("张三"), Fid: "ou_alice", Ftype: "user", Type: "text",
+		Text: "随便聊聊", T: "2026-07-17 12:00"}
+	mk := func(mut func(*Message)) Message { m := base; mut(&m); return m }
+
+	cases := []struct {
+		name   string
+		msg    Message
+		keep   bool
+		reason string
+	}{
+		{"self", mk(func(m *Message) { m.Fid = "ou_SELF" }), false, "self"},
+		{"non-user", mk(func(m *Message) { m.Ftype = "app" }), false, "non-user"},
+		{"empty", mk(func(m *Message) { m.Text = "" }), false, "empty"},
+		{"ignore", mk(func(m *Message) { m.Text = "中午吃什么" }), false, "ignore:吃什么"},
+		{"vc", mk(func(m *Message) { m.Type = "video_chat"; m.Text = "" }), true, "vc"},
+		{"p2p", mk(func(m *Message) { m.Ctype = "p2p"; m.Chat = nil }), true, "p2p"},
+		{"at-me-mentions", mk(func(m *Message) { m.AtIDs = []string{"ou_bob", "ou_SELF"} }), true, "at-me"},
+		{"at-me-content", mk(func(m *Message) { m.Text = `<at user_id="ou_SELF">邹洋</at> 看下` }), true, "at-me"},
+		{"watch-user", mk(func(m *Message) { m.Fid = "ou_vip" }), true, "watch-user"},
+		{"watch-chat", mk(func(m *Message) { m.Cid = "oc_vip" }), true, "watch-chat"},
+		{"watch-name", mk(func(m *Message) { m.From = strPtr("王总") }), true, "watch-name"},
+		{"keyword", mk(func(m *Message) { m.Text = "明天开会" }), true, "keyword:开会"},
+		{"p1", base, true, "p1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, keep := rules.Classify(tc.msg)
+			if keep != tc.keep || got.Reason != tc.reason {
+				t.Errorf("keep=%v reason=%q, want keep=%v reason=%q",
+					keep, got.Reason, tc.keep, tc.reason)
+			}
+		})
+	}
+}
+
+// ClassifyAll 返回 dropped 切片（带丢弃 Reason），kept 打好 p 标签。
+func TestClassifyAllDropped(t *testing.T) {
+	rules := LoadRules("ou_SELF", "", "", "")
+	kept, dropped := rules.ClassifyAll([]Message{
+		{Mid: "om_1", Fid: "ou_SELF", Ftype: "user", Ctype: "p2p", Type: "text", Text: "自己发的"},
+		{Mid: "om_2", Fid: "ou_alice", Ftype: "user", Ctype: "p2p", Type: "text", Text: "在吗"},
+		{Mid: "om_3", Fid: "ou_bot", Ftype: "app", Ctype: "p2p", Type: "text", Text: "bot 消息"},
+	})
+	if len(kept) != 1 || kept[0].Mid != "om_2" || kept[0].P != "P0" || kept[0].Reason != "p2p" {
+		t.Fatalf("kept: %+v", kept)
+	}
+	if len(dropped) != 2 || dropped[0].Reason != "self" || dropped[1].Reason != "non-user" {
+		t.Fatalf("dropped: %+v", dropped)
+	}
+}
 
 // @我判定：真实 API 的 content 是渲染文本（无 <at> 标记），@ 信息在 mentions 数组。
 func TestClassifyAtIDs(t *testing.T) {

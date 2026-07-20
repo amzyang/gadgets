@@ -19,9 +19,12 @@ func chatOpenLink(cid string) string {
 	return ApplinkHost + "/client/chat/open?openChatId=" + cid
 }
 
-// logf 输出 [lark-watch] 前缀的 stderr 诊断日志（事件流走 stdout，互不污染）。
+// logf 输出 [lark-watch] 前缀的 stderr 诊断日志（事件流走 stdout，互不污染），
+// 并 tee 一份进事件日志（evlog）。
 func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "[lark-watch] "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "[lark-watch] %s\n", msg)
+	evlog.Info(msg, "component", "watch")
 }
 
 // Message 是过滤管线的统一消息形态。
@@ -46,6 +49,7 @@ type Message struct {
 	Ftype   string   `json:"ftype"`
 	Link    string   `json:"link"`
 	AtIDs   []string `json:"-"` // mentions 的 open_id 列表；仅供分级判 @我，不进事件 JSON
+	Reason  string   `json:"-"` // Classify 判定理由（keep/drop 皆有），仅供诊断日志，不进事件 JSON
 }
 
 // P0Item 是聚合事件的子条目：正文靠前、ID 收尾，键序哲学与 Message 一致。
@@ -144,6 +148,7 @@ type Status struct {
 	AuthOK               bool             `json:"auth_ok"`
 	AuthRefreshExpiresIn int64            `json:"auth_refresh_expires_in_secs,omitempty"`
 	AuthWarning          string           `json:"auth_warning,omitempty"`
+	EventLog             string           `json:"event_log,omitempty"` // 事件诊断日志路径（LW_EVENT_LOG=0 时缺省）
 }
 
 // EncodeLine 输出单行 JSON + 换行，不转义 HTML（对齐 jq 输出，golden 做字节断言）。

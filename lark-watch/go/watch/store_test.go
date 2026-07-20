@@ -457,3 +457,59 @@ func TestNotifyDeferPurge(t *testing.T) {
 		t.Errorf("fresh entry should survive purge: %v", got)
 	}
 }
+
+// 到期释放按会话为单位：同 cid 未到期条目随到期条目一并带走（跨 tick 积压
+// 一次合并弹出，不再几十秒后二次弹旧内容），他会话不受影响。
+func TestNotifyDeferTakeDueChatLevel(t *testing.T) {
+	s := openTestStore(t)
+	s.NotifyDeferPut([]Message{{Mid: "om_a1", Cid: "oc_a", Text: "第一条"}}, 1000)
+	s.NotifyDeferPut([]Message{{Mid: "om_a2", Cid: "oc_a", Text: "第二条"}}, 2000)
+	s.NotifyDeferPut([]Message{{Mid: "om_b1", Cid: "oc_b", Text: "另一会话"}}, 3000)
+
+	got, err := s.NotifyDeferTakeDue(1000)
+	if err != nil || len(got) != 2 || got[0].Mid != "om_a1" || got[1].Mid != "om_a2" {
+		t.Fatalf("due 应带走 oc_a 全部（含未到期 om_a2）: %v (%v)", got, err)
+	}
+	if got, _ := s.NotifyDeferTakeDue(1000); len(got) != 0 {
+		t.Errorf("二次取应为空: %v", got)
+	}
+	got, _ = s.NotifyDeferTakeDue(3000)
+	if len(got) != 1 || got[0].Mid != "om_b1" {
+		t.Errorf("oc_b 应保留到自己的 due: %v", got)
+	}
+}
+
+// chat_state：本人每会话最新发言时间只增不减，按 cid 子集查询，未知 cid 缺席。
+func TestChatStateSelfLast(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SelfLastUpsert(map[string]string{
+		"oc_a": "2026-07-17 12:01",
+		"oc_b": "2026-07-17 09:30",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 更旧的时间不回退（回看窗口重放），更新的时间覆盖
+	if err := s.SelfLastUpsert(map[string]string{
+		"oc_a": "2026-07-17 11:00",
+		"oc_b": "2026-07-17 10:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.SelfLast([]string{"oc_a", "oc_b", "oc_unknown"})
+	if got["oc_a"] != "2026-07-17 12:01" {
+		t.Errorf("oc_a should keep newer value, got %q", got["oc_a"])
+	}
+	if got["oc_b"] != "2026-07-17 10:00" {
+		t.Errorf("oc_b should advance, got %q", got["oc_b"])
+	}
+	if _, ok := got["oc_unknown"]; ok {
+		t.Error("unknown cid must be absent")
+	}
+	// 子集查询：只要 oc_b
+	if got := s.SelfLast([]string{"oc_b"}); len(got) != 1 || got["oc_b"] != "2026-07-17 10:00" {
+		t.Errorf("subset query: %v", got)
+	}
+	if err := s.SelfLastUpsert(nil); err != nil {
+		t.Errorf("empty upsert should be no-op: %v", err)
+	}
+}

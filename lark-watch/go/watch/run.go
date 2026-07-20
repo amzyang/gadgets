@@ -51,11 +51,15 @@ func RunDaemon(ctx context.Context, s *Store, cli LarkCLI, paths Paths, interval
 	w := &lineWriter{}
 	auth, err := cli.AuthSelf()
 	if err != nil {
-		w.Write(EncodeLine(NewAlert("auth", authAlertMsg(err))))
+		a := NewAlert("auth", authAlertMsg(err))
+		w.Write(EncodeLine(a))
+		logEmit(a)
 		return err
 	}
 	if msg := authExpiringMsg(auth.RefreshExpiresAt, time.Now()); msg != "" {
-		w.Write(EncodeLine(NewAlert("auth-expiring", msg)))
+		a := NewAlert("auth-expiring", msg)
+		w.Write(EncodeLine(a))
+		logEmit(a)
 	}
 	self := auth.OpenID
 
@@ -110,8 +114,10 @@ func superviseCardConsumer(ctx context.Context, s *Store, cli LarkCLI, self stri
 			alerted = false
 		}
 		if fastFails >= 3 && !alerted {
-			out(EncodeLine(NewAlert("card-daemon",
-				"卡片回调监听连续快速失败，正在退避重启；卡片按钮暂不可用，详见 stderr")))
+			a := NewAlert("card-daemon",
+				"卡片回调监听连续快速失败，正在退避重启；卡片按钮暂不可用，详见 stderr")
+			out(EncodeLine(a))
+			logEmit(a)
 			alerted = true
 		}
 		wait := backoffs[min(fastFails, len(backoffs)-1)]

@@ -21,9 +21,12 @@ type cardAction struct {
 	Idx    int    `json:"idx"` // 发送按钮的候选索引；旧卡片无此键，零值即候选 0
 }
 
-// cardLogf 输出 [card] 前缀的 stderr 诊断日志（卡片链路专用）。
+// cardLogf 输出 [card] 前缀的 stderr 诊断日志（卡片链路专用），
+// 并 tee 一份进事件日志（evlog）。
 func cardLogf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "[card] "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "[card] %s\n", msg)
+	evlog.Info(msg, "component", "card")
 }
 
 // HandleCardEvent 处理单个卡片回调（CLI 直接执行，零模型参与）。
@@ -47,6 +50,7 @@ func HandleCardEvent(s *Store, cli LarkCLI, self string, raw []byte, now int64) 
 		cardLogf("event %s missing action/mid", ev.EventID)
 		return
 	}
+	evlog.Info("card.action", "action", act.Action, "mid", act.Mid, "idx", act.Idx, "event_id", ev.EventID)
 
 	drafts, format, cardSrc, hasPending := s.PendingGet(act.Mid)
 	updateCard := func(st doneState, keepIdx int) {

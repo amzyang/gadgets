@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -415,6 +416,52 @@ func TestTickRepliedAnnotation(t *testing.T) {
 	}
 }
 
+// tick 把本人发言时间持久化到 chat_state：延迟通知释放前重判 replied 的信号源。
+func TestTickPersistsSelfLast(t *testing.T) {
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "在吗", "2026-07-17 12:00"),
+			rawMsgJSON("om_2", "ou_SELF", "我", "在的", "2026-07-17 12:01"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	p.Store.SetFetchCursor("oc_a", 1000)
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Store.SelfLast([]string{"oc_a"}); got["oc_a"] != "2026-07-17 12:01" {
+		t.Errorf("self_last should persist after tick, got %v", got)
+	}
+}
+
+// 跨 tick replied：上一 tick 落库的本人回复也算数——晚浮现的旧消息（search 兜底、
+// has_more 续拉）同样注记 replied 并抑制通知，不再只有 90s 回看窗口的记忆。
+func TestTickRepliedAcrossTicks(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "必须是这个", "2026-07-17 12:00"),
+		)},
+	}
+	p, events := newTestPoller(t, f, 2000)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `true`)
+	p.Store.SetFetchCursor("oc_a", 1000)
+	// 模拟上一 tick 观察到的本人回复（本 tick 消息流里没有本人发言）
+	p.Store.SelfLastUpsert(map[string]string{"oc_a": "2026-07-17 12:05"})
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*events) != 1 || !strings.Contains(string((*events)[0]), `"replied":true`) {
+		t.Fatalf("event should carry replied from persisted self_last: %q", *events)
+	}
+	if msgs, _ := p.Store.NotifyDeferTakeDue(1 << 40); len(msgs) != 0 {
+		t.Errorf("replied message must not enter defer queue: %v", msgs)
+	}
+}
+
 // tick 中途 auth 失败不得吞掉已缓冲的 P0：collect 已把 mid 写入 seen，
 // 提前返回若不先发射，重启后被当重复过滤，消息永久丢失。
 func TestTickAuthErrorFlushesBufferedP0(t *testing.T) {
@@ -501,6 +548,75 @@ func TestTickDefersNotifyUntilDraftOrTimeout(t *testing.T) {
 	}
 	if rang.Load() != 1 {
 		t.Errorf("bell rang %d times after flush, want 1", rang.Load())
+	}
+}
+
+// 释放前重判：等草稿/到期期间本人已亲自回复的，兜底释放时不再弹（条目消费掉，
+// 不留队列）。入队时的 replied 判断会过期，弹窗前必须用持久化 self_last 复核。
+func TestFlushDueNotifySkipsReplied(t *testing.T) {
+	rang := stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	p.Store.NotifyDeferPut([]Message{
+		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_1", Type: "text", Text: "在吗", T: "2026-07-17 12:00"},
+	}, 2180)
+	p.Store.SelfLastUpsert(map[string]string{"oc_a": "2026-07-17 12:01"})
+
+	p.flushDueNotify(context.Background(), 2180)
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(out); err == nil {
+		t.Fatal("notify ran for replied message, want dropped")
+	}
+	if rang.Load() != 0 {
+		t.Errorf("bell rang %d times, want 0", rang.Load())
+	}
+	if msgs, _ := p.Store.NotifyDeferTakeDue(1 << 40); len(msgs) != 0 {
+		t.Errorf("entry should be consumed, not left behind: %v", msgs)
+	}
+}
+
+// 混批释放：已回复的丢弃，未回复的照常弹（内容只含未回复那条）。
+func TestFlushDueNotifyDropsRepliedKeepsOthers(t *testing.T) {
+	rang := stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	p.Store.NotifyDeferPut([]Message{
+		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_1", Type: "text", Text: "必须是这个", T: "2026-07-17 12:00"},
+		{From: strPtr("李四"), Cid: "oc_b", Mid: "om_2", Type: "text", Text: "帮我看下", T: "2026-07-17 12:00"},
+	}, 2180)
+	p.Store.SelfLastUpsert(map[string]string{"oc_a": "2026-07-17 12:03"})
+
+	p.flushDueNotify(context.Background(), 2180)
+	if got := string(waitForFile(t, out)); got != "李四（私聊）: 帮我看下" {
+		t.Errorf("notify message: got %q", got)
+	}
+	if rang.Load() != 1 {
+		t.Errorf("bell rang %d times, want 1", rang.Load())
+	}
+}
+
+// 同分钟不算已回复：释放侧保持 selfRepliedAfter 的严格大于语义，宁可多提醒。
+func TestFlushDueNotifySameMinuteStillNotifies(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	p.Store.NotifyDeferPut([]Message{
+		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_1", Type: "text", Text: "在吗", T: "2026-07-17 12:00"},
+	}, 2180)
+	p.Store.SelfLastUpsert(map[string]string{"oc_a": "2026-07-17 12:00"})
+
+	p.flushDueNotify(context.Background(), 2180)
+	if got := string(waitForFile(t, out)); got != "张三（私聊）: 在吗" {
+		t.Errorf("same-minute reply must still notify: got %q", got)
 	}
 }
 
@@ -642,6 +758,206 @@ func TestDispatchNotifyDeferFailFallback(t *testing.T) {
 	}
 	if got := string(waitForFile(t, out)); got != "张三（私聊）: 在吗" {
 		t.Errorf("generic notify message: got %q", got)
+	}
+}
+
+// 事件日志：keep 在去重后记 Info；drop 按理由分流（self 降 DEBUG）；重复拉取记
+// msg.dup；tick 摘要与 emit/notify.skip 留痕。
+func TestTickLogsKeepDropDup(t *testing.T) {
+	logs := captureEvlog(t)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_self", "ou_SELF", "我", "自己发的", "2026-07-17 12:00"),
+			rawMsgJSON("om_ig", "ou_alice", "张三", "中午吃什么", "2026-07-17 12:01"),
+			rawMsgJSON("om_new", "ou_alice", "张三", "帮我看个问题", "2026-07-17 12:02"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	writeConfig(t, p.Paths.ConfigDir, "ignore", "吃什么\n")
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	recs := logs()
+	keeps := findLogs(recs, "msg.keep")
+	if len(keeps) != 1 || keeps[0]["mid"] != "om_new" || keeps[0]["reason"] != "p2p" ||
+		keeps[0]["p"] != "P0" || keeps[0]["level"] != "INFO" {
+		t.Errorf("msg.keep: %v", keeps)
+	}
+	drops := findLogs(recs, "msg.drop")
+	if len(drops) != 2 {
+		t.Fatalf("want 2 msg.drop, got %v", drops)
+	}
+	byMid := map[string]map[string]any{}
+	for _, d := range drops {
+		byMid[d["mid"].(string)] = d
+	}
+	if d := byMid["om_self"]; d["reason"] != "self" || d["level"] != "DEBUG" {
+		t.Errorf("self drop should be DEBUG: %v", d)
+	}
+	if d := byMid["om_ig"]; d["reason"] != "ignore:吃什么" || d["level"] != "INFO" {
+		t.Errorf("ignore drop should be INFO: %v", d)
+	}
+	if ticks := findLogs(recs, "tick"); len(ticks) != 1 || ticks[0]["new"] != float64(1) ||
+		ticks[0]["p0"] != float64(1) || ticks[0]["level"] != "INFO" {
+		t.Errorf("tick summary: %v", ticks)
+	}
+	if emits := findLogs(recs, "emit"); len(emits) != 1 || emits[0]["kind"] != "p0" ||
+		emits[0]["mid"] != "om_new" {
+		t.Errorf("emit: %v", emits)
+	}
+	// 未配置 notify 脚本但有 P0 批次：跳过留痕
+	if r := findLogs(recs, "notify.skip"); len(r) != 1 || r[0]["reason"] != "no-script" {
+		t.Errorf("notify.skip: %v", r)
+	}
+
+	// 同一批消息再 tick：无新 keep，回看窗口的重复降为 msg.dup（debug）
+	if err := p.tick(context.Background(), 2001, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	recs = logs()
+	if keeps := findLogs(recs, "msg.keep"); len(keeps) != 1 {
+		t.Errorf("second tick must not re-keep, got %v", keeps)
+	}
+	dups := findLogs(recs, "msg.dup")
+	if len(dups) != 1 || dups[0]["mid"] != "om_new" || dups[0]["level"] != "DEBUG" {
+		t.Errorf("msg.dup: %v", dups)
+	}
+}
+
+// 安静 tick 摘要降为 Debug（info 级不落盘）；search 兜底跑过的 tick 保持 Info。
+func TestTickSummaryLevels(t *testing.T) {
+	logs := captureEvlogAt(t, slog.LevelInfo)
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	for i := int64(0); i < 3; i++ {
+		if err := p.tick(context.Background(), 2000+i, "ou_SELF"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ticks := findLogs(logs(), "tick")
+	if len(ticks) != 1 {
+		t.Fatalf("want only the search tick at info level, got %v", ticks)
+	}
+	if ticks[0]["search"] != true || ticks[0]["new"] != float64(0) {
+		t.Errorf("tick attrs: %v", ticks[0])
+	}
+}
+
+// emit 钩子：每条 stdout 事件按类型记 kind 与关键 id。
+func TestEmitLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	p.emit(Message{P: "P0", Mid: "om_e", Cid: "oc_a", N: 2, Replied: true})
+	p.emit(NewAlert("api", "连续失败"))
+	p.emit(Backlog{P: "backlog", OfflineSecs: 42})
+	p.emit(BuildDigest([]Message{{P: "P1", Cid: "oc_a", Chat: strPtr("群A"), Text: "hi"}}))
+
+	recs := findLogs(logs(), "emit")
+	if len(recs) != 4 {
+		t.Fatalf("want 4 emit records, got %v", recs)
+	}
+	if r := recs[0]; r["kind"] != "p0" || r["mid"] != "om_e" || r["n"] != float64(2) || r["replied"] != true {
+		t.Errorf("p0 emit: %v", r)
+	}
+	if r := recs[1]; r["kind"] != "alert" || r["alert_kind"] != "api" || r["text"] != "连续失败" {
+		t.Errorf("alert emit: %v", r)
+	}
+	if r := recs[2]; r["kind"] != "backlog" || r["offline_secs"] != float64(42) {
+		t.Errorf("backlog emit: %v", r)
+	}
+	if r := recs[3]; r["kind"] != "digest" || r["n"] != float64(1) {
+		t.Errorf("digest emit: %v", r)
+	}
+}
+
+// 通知链路：defer 入队与到期 flush 都留痕（mids 可与 msg.keep 对上）。
+func TestTickNotifyDeferFlushLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "帮我看个问题", "2026-07-17 12:00"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	defers := findLogs(logs(), "notify.defer")
+	if len(defers) != 1 || defers[0]["n"] != float64(1) ||
+		defers[0]["due"] != float64(2000+notifyGraceSecs()) {
+		t.Fatalf("notify.defer: %v", defers)
+	}
+	if ms, ok := defers[0]["mids"].([]any); !ok || len(ms) != 1 || ms[0] != "om_1" {
+		t.Errorf("defer mids: %v", defers[0]["mids"])
+	}
+
+	p.flushDueNotify(context.Background(), 2000+notifyGraceSecs())
+	waitForFile(t, out) // 等脚本落盘，避免通知 goroutine 逸出测试
+	flushes := findLogs(logs(), "notify.flush")
+	if len(flushes) != 1 || flushes[0]["n"] != float64(1) || flushes[0]["script"] != true {
+		t.Errorf("notify.flush: %v", flushes)
+	}
+}
+
+// 本人已回复的通知抑制留痕（批次清空后不 defer）。
+func TestTickNotifyRepliedLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	f := &listFake{
+		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
+		msgs: map[string]string{"oc_a": chatMsgsResp(false,
+			rawMsgJSON("om_1", "ou_alice", "张三", "在吗", "2026-07-17 12:00"),
+			rawMsgJSON("om_2", "ou_SELF", "我", "在的", "2026-07-17 12:01"),
+		)},
+	}
+	p, _ := newTestPoller(t, f, 2000)
+	writeConfig(t, p.Paths.ConfigDir, "notify", "true")
+	p.Store.SetFetchCursor("oc_a", 1000)
+
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	recs := logs()
+	if r := findLogs(recs, "notify.replied"); len(r) != 1 || r[0]["n"] != float64(1) {
+		t.Errorf("notify.replied: %v", r)
+	}
+	if r := findLogs(recs, "notify.defer"); len(r) != 0 {
+		t.Errorf("empty batch must not defer: %v", r)
+	}
+}
+
+// grace=0 即时路径与 vc 专用路径的分流留痕。
+func TestDispatchNotifyVCNowLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	calls := stubVCDialog(t)
+	t.Setenv("LW_NOTIFY_GRACE", "0")
+	p, _ := newTestPoller(t, &listFake{}, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+
+	p.dispatchNotify(context.Background(), `printf '%s' "$LW_MESSAGE" > "$LW_TEST_OUT"`, []Message{
+		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: "lark://vc", Mid: "om_v"},
+		{From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗", Mid: "om_t"},
+	}, 2000)
+	waitForDialog(t, calls)
+	waitForFile(t, out)
+
+	if r := findLogs(logs(), "notify.vc"); len(r) != 1 || r[0]["n"] != float64(1) {
+		t.Errorf("notify.vc: %v", r)
+	}
+	if r := findLogs(logs(), "notify.now"); len(r) != 1 || r[0]["n"] != float64(1) {
+		t.Errorf("notify.now: %v", r)
 	}
 }
 
