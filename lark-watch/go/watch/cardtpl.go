@@ -95,7 +95,8 @@ func padCardFences(s string) string {
 // format=="markdown" 时草稿按 markdown 渲染（预览≈对方所见），否则包围栏展示源文。
 // drafts 为候选列表（len >= 1）：单条时布局与文案同单草稿；多条时每条标注圈号
 // （①②③…，SKILL.md 约束 1–3 条，圈号字符到 ⑳ 为止）并各带自己的发送按钮。
-func RenderDraftCard(mid, scene, from, t, original string, drafts []string, format string) string {
+// note 非空时在全部候选之后、共享按钮之前追加灰字「依据」状态行（表态门禁）。
+func RenderDraftCard(mid, scene, from, t, original string, drafts []string, format, note string) string {
 	var c draftCard
 	c.Schema = "2.0"
 	c.Config.UpdateMulti = true
@@ -136,6 +137,12 @@ func RenderDraftCard(mid, scene, from, t, original string, drafts []string, form
 			cardElement{Tag: "markdown", ElementID: fmt.Sprintf("draft-%d", i), Content: draftMD},
 			button(label, "primary_filled", map[string]any{"action": "send", "mid": mid, "idx": i}),
 		)
+	}
+	if note != "" {
+		c.Body.Elements = append(c.Body.Elements, cardElement{
+			Tag:     "markdown",
+			Content: fmt.Sprintf("<font color='grey'>依据：%s</font>", escapeCardMarkdown(note)),
+		})
 	}
 	c.Body.Elements = append(c.Body.Elements,
 		button("复制草稿", "default", map[string]any{"action": "copy", "mid": mid}),

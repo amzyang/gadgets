@@ -41,6 +41,9 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 - `--format text|markdown`（默认 text）随 pending 落盘：markdown 时草稿在卡片里
   按 markdown 渲染（保留围栏，开围栏前自动补空行——卡片方言要求），确认后以
   `--markdown` 走 post 富文本回复；text 时确认后以 `--text` 纯文本回复。
+- `--note <text>`（表态门禁场景带上）：在全部候选块之后、共享按钮之前追加灰字
+  「依据：…」状态行；空值整体省略。该行无 element_id、非按钮，完成态改卡时
+  与引用块一样保留。
 - 转义由二进制处理：`<at ...>名字</at>` → `@名字`，markdown 特殊字符转 HTML 实体
   （原始消息引用）；text 格式草稿内代码围栏降级为 `'''`、整体以代码块展示。
 - pending（草稿 + 卡片原稿）写入 SQLite `pending` 表——改卡用本地原稿而非回调的

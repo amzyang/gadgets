@@ -18,7 +18,7 @@ func TestRunSendCardMulti(t *testing.T) {
 	os.WriteFile(p1, []byte("候选一\n"), 0o644)
 	os.WriteFile(p2, []byte("候选二\n"), 0o644)
 
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_sc", []string{p1, p2}, "原消息", "张三", "私聊", "12:00", "text"); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_sc", []string{p1, p2}, "原消息", "张三", "私聊", "12:00", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 	drafts, format, card, ok := s.PendingGet("om_sc")
@@ -65,7 +65,7 @@ func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 
 	draft := filepath.Join(dir, "d.md")
 	os.WriteFile(draft, []byte("好的，我看下"), 0o644)
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, "帮我看个问题", "张三", "私聊", "12:01", "text"); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, "帮我看个问题", "张三", "私聊", "12:01", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,7 +94,7 @@ func TestRunSendCardNoDeferredNotify(t *testing.T) {
 
 	draft := filepath.Join(dir, "d.md")
 	os.WriteFile(draft, []byte("好的"), 0o644)
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_x", []string{draft}, "", "", "", "", "text"); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_x", []string{draft}, "", "", "", "", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -116,7 +116,7 @@ func TestRunSendCardEmptyDraft(t *testing.T) {
 	os.WriteFile(p1, []byte("候选一"), 0o644)
 	os.WriteFile(p2, []byte("\n"), 0o644)
 
-	err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_e", []string{p1, p2}, "", "", "", "", "text")
+	err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_e", []string{p1, p2}, "", "", "", "", "text", "")
 	if err == nil || !strings.Contains(err.Error(), "draft 2 is empty") {
 		t.Fatalf("want draft 2 empty error, got %v", err)
 	}
