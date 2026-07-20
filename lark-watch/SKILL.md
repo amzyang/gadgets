@@ -86,6 +86,13 @@ stdout 每行一个 JSON 事件，`p` 字段区分类型。**判断权在模型*
    `lark-cli im +chat-messages-list --chat-id <cid> --page-size 10 --no-reactions --format json`
    线程消息用 `+threads-messages-list --thread <omt_>`。阅读时区分本人发言
    （sender id 为自己的 open_id），别把他人的话当成自己的承诺。
+   消息含图（`type` 为 `image`、`post` 带 image 块，或正文/相邻消息提到
+   附图/截图/如图）时必须先下载真看再细判：从上述消息列表的 content 里取
+   `image_key`，执行
+   `cd $(mktemp -d) && lark-cli im +messages-resources-download --message-id <mid> --file-key <img_key> --type image --output img.png`
+   （`--output` 只接受相对路径，故先进临时目录），再用 Read 查看图片。
+   拿不到 image_key（合并转发、卡片等结构）时，转述与草稿显式声明
+   「图片未能查看」，不得静默推断。
 3. **分类**：咨询 / 闲聊 / 任务 / FYI。
 4. **草稿**：起草前先注入个人画像（lark-persona 产物；文件存在才用，缺失静默跳过）：
    读 `~/.local/share/lark-persona/persona/contacts/<fid>.md`（对此人的称呼与语气分寸）
@@ -211,6 +218,9 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
   （TaskStop + `ScheduleWakeup stop:true`）。
 - **实时链路不重放历史**：首启 baseline 从当下开始，停机重启自动夹紧游标。
   历史积压只经「补课」显式命令拉取，不要在实时链路里主动搜旧消息。
+- **图片先看后判**：带图消息必须下载并真实查看图片后才能分类/起草
+  （下载命令见「事件处理」的「上下文」步骤）；禁止凭周边文字推断图片内容
+  （曾发生：把「咨询详情」截图误判为 Grafana 看板）。
 - **误报治理**：某类消息反复被推送但用户不关心时，主动建议加噪音规则：
   `{SKILL_DIR}/bin/lark-watch ignore-add '<regex>'`（对 "cid 群名 人名 正文"
   拼接串匹配，可压掉 P0；先经正则校验，坏模式会被拒绝）。下一 tick 即生效。
