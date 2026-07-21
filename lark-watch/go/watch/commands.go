@@ -303,7 +303,7 @@ func deletePending(s *Store, mid string) {
 
 // RunSendDraft 是 send-draft 子命令入口（通知弹窗「发送」按钮的回调）：
 // 按 pending 里的候选直接以用户身份回复，语义与卡片「发送」一致（幂等键 =
-// 源消息 mid，弹窗/卡片双端点击也不会双发）。成功后按 card_mid 改卡
+// draftIdemKey，弹窗/卡片双端点击也不会双发）。成功后按 card_mid 改卡
 // 「✅ 已发送」（只留所发候选）并删除 pending。失败保留 pending 并弹错误提示
 // （弹窗场景无终端可看，静默失败会让用户误以为已发出；提示弹窗 best-effort）。
 func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid string, idx int) error {
@@ -315,7 +315,7 @@ func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid s
 	if idx < 0 || idx >= len(drafts) {
 		return fmt.Errorf("draft idx %d out of range for %s (%d drafts)", idx, mid, len(drafts))
 	}
-	if err := cli.ReplyAsUser(mid, drafts[idx], format, mid); err != nil {
+	if err := cli.ReplyAsUser(mid, drafts[idx], format, draftIdemKey(mid, drafts[idx])); err != nil {
 		evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", false)
 		alertUser(ctx, paths.ConfigDir, "回复发送失败", "草稿发送失败，请回终端或卡片处理")
 		return err
@@ -327,12 +327,23 @@ func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid s
 	return nil
 }
 
-// quickIdemKey 是常用语快捷回复的幂等键：与卡片/弹窗「发送」的键（= mid）
-// 分离——共键会让服务端把后发的正式回复当重复吞掉；带文本哈希则同一条
-// 常用语连点仍防双发、不同常用语互不干扰。
+// quickIdemKey 是常用语快捷回复的幂等键：与草稿「发送」的键（draftIdemKey，
+// -d- 前缀）分离——共键会让服务端把后发的正式回复当重复吞掉；带文本哈希则
+// 同一条常用语连点仍防双发、不同常用语互不干扰。
 func quickIdemKey(mid, text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return mid + "-q-" + hex.EncodeToString(sum[:4])
+}
+
+// draftIdemKey 是草稿「发送」的幂等键，卡片端与弹窗端共用同一构造：同一轮
+// 同一候选双端点击共键不双发。裸 mid 不可用——同 mid 二次起草后点「发送」
+// 会落进服务端约一小时的去重窗口被当重复吞掉，卡片改「已发送」而消息并未
+// 发出（静默丢失）；带候选指纹则不同轮草稿、不同候选互不干扰。防双发的
+// 第一道防线是 pending 删除（后点的一端走「草稿已失效」），此键只兜双端
+// 几乎同时点击的竞态窗口。
+func draftIdemKey(mid, draft string) string {
+	sum := sha256.Sum256([]byte(draft))
+	return mid + "-d-" + hex.EncodeToString(sum[:4])
 }
 
 // RunSendText 是 send-text 子命令入口（通知横幅常用语动作的回调）：

@@ -214,7 +214,8 @@ func stubSendDraftAlert(t *testing.T) *[]string {
 }
 
 // send-draft（弹窗「发送」回调）：按 idx 发送 pending 候选并删除 pending，
-// 语义与卡片「发送」一致（幂等键 = 源消息 mid）；成功后按 card_mid 改卡
+// 语义与卡片「发送」一致（幂等键 = mid+候选指纹，双端共键不双发；裸 mid 会
+// 让同 mid 二次起草的发送被服务端去重吞掉）；成功后按 card_mid 改卡
 // 「已发送」（只留所发候选，按钮剥除），改卡成功记 Debug 级 card.done。
 func TestRunSendDraft(t *testing.T) {
 	logs := captureEvlog(t)
@@ -232,7 +233,12 @@ func TestRunSendDraft(t *testing.T) {
 	if len(done) != 1 || done[0]["mid"] != "om_p1" || done[0]["state"] != "回复已发送" || done[0]["level"] != "DEBUG" {
 		t.Errorf("card.done: %v", done)
 	}
-	if !cli.hasCall("reply om_p1 候选一 format=text key=om_p1") {
+	key := draftIdemKey("om_p1", "候选一")
+	if key == "om_p1" || key == draftIdemKey("om_p1", "候选二") ||
+		key == quickIdemKey("om_p1", "候选一") {
+		t.Errorf("draft idem key must differ from mid/quick key and vary by candidate: %s", key)
+	}
+	if !cli.hasCall("reply om_p1 候选一 format=text key=" + key) {
 		t.Errorf("reply args wrong: %v", cli.calls)
 	}
 	if _, _, _, ok := s.PendingGet("om_p1"); ok {

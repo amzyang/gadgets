@@ -150,7 +150,7 @@ func (h *CardHandler) handleDraft(ev CardEvent, act cardAction) {
 			updateCard(doneStale, -1)
 			return
 		}
-		if err := h.CLI.ReplyAsUser(act.Mid, drafts[act.Idx], format, act.Mid); err != nil {
+		if err := h.CLI.ReplyAsUser(act.Mid, drafts[act.Idx], format, draftIdemKey(act.Mid, drafts[act.Idx])); err != nil {
 			updateCard(doneFailed, -1)
 			cardLogf("reply failed for %s (pending kept): %v", act.Mid, err)
 			return

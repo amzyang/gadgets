@@ -211,7 +211,7 @@ func TestCardSend(t *testing.T) {
 
 	handleCard(s, cli, "ou_SELF", cardEvent("e1", "tok1", "send", "om_t1"), 100)
 
-	if !cli.hasCall("reply om_t1 测试草稿 format=text") {
+	if !cli.hasCall("reply om_t1 测试草稿 format=text key=" + draftIdemKey("om_t1", "测试草稿")) {
 		t.Errorf("reply args wrong: %v", cli.calls)
 	}
 	if _, _, _, ok := s.PendingGet("om_t1"); ok {
