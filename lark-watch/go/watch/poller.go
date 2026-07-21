@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -61,7 +62,16 @@ type Poller struct {
 
 	Now func() int64 // 测试注入；默认 time.Now
 
-	tickN int
+	tickN    int
+	notifyWG sync.WaitGroup // 在飞通知 goroutine（goNotify 追踪）
+}
+
+// goNotify 异步执行通知（弹窗阻塞至用户交互，不能拖住轮询），经 WaitGroup 追踪：
+// 通知 goroutine 读探针/响铃等注入点，逸出 Poller 生命周期会与后续对注入点的
+// 写并发（测试替换 stub 时数据竞争），测试收尾时 join（见 newTestPoller）。
+func (p *Poller) goNotify(fn func()) {
+	p.notifyWG.Add(1)
+	go func() { defer p.notifyWG.Done(); fn() }()
 }
 
 func (p *Poller) now() int64 {
@@ -425,19 +435,19 @@ func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Mess
 	}
 	if len(vc) > 0 {
 		evlog.Info("notify.vc", "n", len(vc), "mids", mids(vc))
-		go RunNotifyVC(ctx, p.Paths, vc)
+		p.goNotify(func() { RunNotifyVC(ctx, p.Paths, vc) })
 	}
 	if len(rest) == 0 {
 		return
 	}
 	if notifyGraceSecs() <= 0 {
 		evlog.Info("notify.now", "n", len(rest), "mids", mids(rest))
-		go RunNotify(ctx, p.Paths.ConfigDir, script, rest)
+		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, rest) })
 		return
 	}
 	if err := p.Store.NotifyDeferPut(rest, now+notifyGraceSecs()); err != nil {
 		logf("notify defer failed, notifying now: %v", err)
-		go RunNotify(ctx, p.Paths.ConfigDir, script, rest)
+		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, rest) })
 	} else {
 		evlog.Info("notify.defer", "n", len(rest), "mids", mids(rest), "due", now+notifyGraceSecs())
 	}
@@ -458,7 +468,7 @@ func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 	script, enabled := LoadNotifyScript(p.Paths.ConfigDir)
 	evlog.Info("notify.flush", "n", len(batch), "mids", mids(batch), "script", script != "", "enabled", enabled)
 	if enabled {
-		go RunNotify(ctx, p.Paths.ConfigDir, script, batch)
+		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, batch) })
 	}
 }
 

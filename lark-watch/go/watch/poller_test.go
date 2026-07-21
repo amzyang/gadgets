@@ -67,6 +67,9 @@ func newTestPoller(t *testing.T, cli LarkCLI, now int64) (*Poller, *[][]byte) {
 		Out: func(line []byte) { events = append(events, append([]byte(nil), line...)) },
 		Now: func() int64 { return now },
 	}
+	// 通知 goroutine 不得逸出测试：join 注册在各 stub 之后（Cleanup LIFO 先跑），
+	// 复原 stub 前先等 goroutine 退出，否则与下个测试写探针/响铃注入点竞争。
+	t.Cleanup(p.notifyWG.Wait)
 	return p, &events
 }
 
@@ -368,6 +371,9 @@ func TestTickAggregatesSameChat(t *testing.T) {
 
 // 音视频会议不聚合：同会话同 tick 里 vc 即时单发，其余文本照常聚合。
 func TestTickVCNotAggregated(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	stubVCDialog(t)
 	f := &listFake{
 		chats: []ChatMeta{{Cid: "oc_a", Name: "张三", Mode: "p2p"}},
 		msgs: map[string]string{"oc_a": chatMsgsResp(false,

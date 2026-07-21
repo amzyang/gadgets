@@ -134,12 +134,30 @@ func SuperviseCardConsumerStandalone(ctx context.Context, s *Store, cli LarkCLI,
 	superviseCardConsumer(ctx, s, cli, self, w.Write)
 }
 
+// 关停时序参数（测试注入）：WaitDelay 兜底强杀直接子进程；StopGrace 是
+// 组 TERM 后强关 stdout 读端前的优雅退订窗口。
+var (
+	consumerWaitDelay = 10 * time.Second
+	consumerStopGrace = 10 * time.Second
+)
+
 // runConsumerOnce 跑一轮 consume 子进程直到其退出。
 // stdin 由父进程持有写端保活（无界 consume 在 stdin EOF 时会优雅退出）。
 func runConsumerOnce(ctx context.Context, s *Store, cli LarkCLI, self string) error {
 	cmd := cli.EventConsumeCmd(ctx)
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = 10 * time.Second
+	// npm bin shim 会再 spawn 真正的 node 进程：信号只发直接子进程会漏掉它，
+	// 孤儿继续握着 stdout 写端把 Scan 钉死、cmd.Wait 永不可达（2026-07-21
+	// 关停死锁实证）。自建进程组、按组 SIGTERM，整棵树一起优雅退订。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = consumerWaitDelay
+	stopGrace := consumerStopGrace // 入口取值：兜底 goroutine 可比本函数晚退，不读包级变量
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
@@ -154,6 +172,22 @@ func runConsumerOnce(ctx context.Context, s *Store, cli LarkCLI, self string) er
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// 读端兜底：对自建会话/忽略 TERM 的后代，组信号无效，宽限期后强关
+	// stdout 读端解除 Scan 阻塞——关停不依赖子进程配合。与 Wait 的收尾
+	// Close 并发安全（*os.File 双 Close 幂等）。
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-watchDone:
+		case <-ctx.Done():
+			select {
+			case <-watchDone:
+			case <-time.After(stopGrace):
+				stdout.Close()
+			}
+		}
+	}()
 	s.MetaSet("consumer_state", "alive")
 	cardLogf("consumer started (pid %d)", cmd.Process.Pid)
 
