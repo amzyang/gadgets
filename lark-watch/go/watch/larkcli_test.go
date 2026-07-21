@@ -123,6 +123,34 @@ func TestReplyArgs(t *testing.T) {
 	}
 }
 
+// run 的三个出口（成功 / exec 失败 / ok=false 信封）都在 cmd.exec 留痕。
+func TestRunLogsCmdExec(t *testing.T) {
+	logs := captureEvlog(t)
+
+	if _, err := (&ExecLarkCLI{Bin: "echo"}).run("hello"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&ExecLarkCLI{Bin: "false"}).run("im", "x"); err == nil {
+		t.Fatal("false: want error")
+	}
+	if _, err := (&ExecLarkCLI{Bin: "echo"}).run(`{"ok":false}`); err == nil {
+		t.Fatal("ok=false envelope: want error")
+	}
+
+	recs := findLogs(logs(), "cmd.exec")
+	if len(recs) != 3 {
+		t.Fatalf("want 3 cmd.exec records, got %d: %v", len(recs), recs)
+	}
+	if r := recs[0]; r["level"] != "DEBUG" || r["bin"] != "echo" || r["out_bytes"].(float64) <= 0 || r["ms"] == nil {
+		t.Errorf("success record: %v", r)
+	}
+	for _, r := range recs[1:] {
+		if r["level"] != "ERROR" || r["err"] == nil {
+			t.Errorf("failure record: %v", r)
+		}
+	}
+}
+
 func TestIsRestrictedModeError(t *testing.T) {
 	// 取自真实 231203 响应：群开启防泄密模式，API 禁止读取消息
 	envelope := &ExecError{Args: []string{"im", "+chat-messages-list"},

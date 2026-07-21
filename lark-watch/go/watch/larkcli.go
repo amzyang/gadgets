@@ -86,16 +86,18 @@ func (c *ExecLarkCLI) bin() string {
 	return "lark-cli"
 }
 
-// run 执行命令并要求信封 ok==true。
-func (c *ExecLarkCLI) run(args ...string) ([]byte, error) {
+// run 执行命令并要求信封 ok==true；调用与结果经 logCmd 留痕（三个出口都覆盖）。
+func (c *ExecLarkCLI) run(args ...string) (out []byte, err error) {
+	start := time.Now()
+	defer func() { logCmd(c.bin(), args, time.Since(start), len(out), err) }()
 	cmd := exec.Command(c.bin(), args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	out := stdout.Bytes()
-	if err != nil {
-		return out, &ExecError{Args: args, Stderr: truncateRunes(stderr.String()+stdout.String(), 400), Err: err}
+	runErr := cmd.Run()
+	out = stdout.Bytes()
+	if runErr != nil {
+		return out, &ExecError{Args: args, Stderr: truncateRunes(stderr.String()+stdout.String(), 400), Err: runErr}
 	}
 	var env struct {
 		OK *bool `json:"ok"`

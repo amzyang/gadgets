@@ -61,7 +61,8 @@ const roomBookTimeout = 60 * time.Second
 // Book 执行 room book --json（固定 argv 绝不过 shell，参数来自本地 SQLite）。
 // 契约见 ~/.claude/skills/room/SKILL.md：exit 0 ⟺ 订上且 stdout 是成功信封；
 // 失败时 stderr 最后一行是错误信封。返回的 error 恒为 *BookError。
-func (b *ExecRoomBooker) Book(ctx context.Context, slot BookSlot, title string, participants []string) (BookResult, error) {
+// 调用与结果经 logCmd 留痕。
+func (b *ExecRoomBooker) Book(ctx context.Context, slot BookSlot, title string, participants []string) (res BookResult, err error) {
 	ctx, cancel := context.WithTimeout(ctx, roomBookTimeout)
 	defer cancel()
 	args := []string{"book", "-d", slot.Date, "-t", slot.Time, "--title", title}
@@ -73,8 +74,10 @@ func (b *ExecRoomBooker) Book(ctx context.Context, slot BookSlot, title string, 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return BookResult{}, parseBookError(stderr.Bytes(), err)
+	start := time.Now()
+	defer func() { logCmd(b.bin(), args, time.Since(start), stdout.Len(), err) }()
+	if runErr := cmd.Run(); runErr != nil {
+		return BookResult{}, parseBookError(stderr.Bytes(), runErr)
 	}
 	return parseBookSuccess(stdout.Bytes())
 }

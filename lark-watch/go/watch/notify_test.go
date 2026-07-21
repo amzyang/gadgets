@@ -428,6 +428,39 @@ func TestAlerterGenericVCArgs(t *testing.T) {
 	}
 }
 
+// 三个 shell 漏斗（runShellCmd/startShellCmd/runNotifyScript）都在 cmd.exec
+// 留痕，argv 原样入档（-c script sh args…），成功 Debug / 失败 Error。
+func TestShellCmdLogsCmdExec(t *testing.T) {
+	logs := captureEvlog(t)
+
+	if err := runShellCmd(context.Background(), "exit 0", []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := startShellCmd("exit 64", nil); err == nil {
+		t.Fatal("early exit: want error")
+	}
+	if err := runNotifyScript(context.Background(), "exit 3", "LW_TITLE=t"); err == nil {
+		t.Fatal("exit 3: want error")
+	}
+
+	recs := findLogs(logs(), "cmd.exec")
+	if len(recs) != 3 {
+		t.Fatalf("want 3 cmd.exec records, got %d: %v", len(recs), recs)
+	}
+	ok := recs[0]
+	if ok["level"] != "DEBUG" || ok["bin"] != "sh" {
+		t.Errorf("success record: %v", ok)
+	}
+	if args, _ := ok["args"].([]any); len(args) != 4 || args[1] != "exit 0" || args[3] != "a1" {
+		t.Errorf("argv should carry script and positional args: %v", ok["args"])
+	}
+	for _, r := range recs[1:] {
+		if r["level"] != "ERROR" || r["err"] == nil {
+			t.Errorf("failure record: %v", r)
+		}
+	}
+}
+
 // startShellCmd 须捕捉秒退失败（旗标不兼容等启动即败场景），长驻横幅照常放行。
 // 回归背景：alerter 26 改用双横线旗标，旧调用瞬间 exit 64，但 Start 成功、
 // case 吞掉空输出，横幅从未出现且日志零错误——失败必须在启动窗口内可观察。

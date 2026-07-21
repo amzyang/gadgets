@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // syncBuf 是并发安全的内存 buffer：emit/notify 链路在 goroutine 里写日志，
@@ -241,6 +242,57 @@ func TestLogCmdError(t *testing.T) {
 	r := recs[0]
 	if r["level"] != "ERROR" || r["cmd"] != "send-card" || r["err"] != "send card failed: boom" {
 		t.Errorf("cmd.error fields: %v", r)
+	}
+}
+
+// cmd.exec：外部命令调用留痕——成功 Debug（poller 高频，默认不落盘），
+// 失败 Error 始终落盘；bin/args/ms/out_bytes 齐全，超长参数逐参截断。
+func TestLogCmd(t *testing.T) {
+	logs := captureEvlog(t)
+
+	long := strings.Repeat("长", cmdArgMaxRunes+80)
+	logCmd("lark-cli", []string{"im", long}, 250*time.Millisecond, 42, nil)
+	logCmd("room", []string{"book"}, time.Second, 7, errors.New("exit status 1"))
+
+	recs := findLogs(logs(), "cmd.exec")
+	if len(recs) != 2 {
+		t.Fatalf("want 2 cmd.exec records, got %v", recs)
+	}
+	ok := recs[0]
+	if ok["level"] != "DEBUG" || ok["bin"] != "lark-cli" || ok["ms"] != float64(250) ||
+		ok["out_bytes"] != float64(42) || ok["err"] != nil {
+		t.Errorf("success record: %v", ok)
+	}
+	args, _ := ok["args"].([]any)
+	if len(args) != 2 || args[0] != "im" {
+		t.Fatalf("args: %v", ok["args"])
+	}
+	if got, _ := args[1].(string); got != strings.Repeat("长", cmdArgMaxRunes) {
+		t.Errorf("long arg should truncate to %d runes, got %d", cmdArgMaxRunes, len([]rune(got)))
+	}
+	fail := recs[1]
+	if fail["level"] != "ERROR" || fail["bin"] != "room" || fail["err"] != "exit status 1" ||
+		fail["out_bytes"] != float64(7) {
+		t.Errorf("failure record: %v", fail)
+	}
+}
+
+// cmd.invoke：lark-watch 自身子命令入口留痕（Info 级，与 cmd.error 配对）。
+func TestLogCmdInvoke(t *testing.T) {
+	logs := captureEvlog(t)
+
+	LogCmdInvoke("send-card", []string{"--mid", "om_1"})
+
+	recs := findLogs(logs(), "cmd.invoke")
+	if len(recs) != 1 {
+		t.Fatalf("want 1 cmd.invoke record, got %v", recs)
+	}
+	r := recs[0]
+	if r["level"] != "INFO" || r["cmd"] != "send-card" {
+		t.Errorf("cmd.invoke fields: %v", r)
+	}
+	if args, _ := r["args"].([]any); len(args) != 2 || args[0] != "--mid" || args[1] != "om_1" {
+		t.Errorf("cmd.invoke args: %v", r["args"])
 	}
 }
 

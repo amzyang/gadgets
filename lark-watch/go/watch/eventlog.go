@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const eventLogName = "events.log"
@@ -54,6 +55,38 @@ func InitEventLog(stateDir string) func() {
 // 必须留痕；命令级失败统一按 level=="ERROR" 过滤。
 func LogCmdError(cmd string, err error) {
 	evlog.Error("cmd.error", "cmd", cmd, "err", err.Error())
+}
+
+// cmdArgMaxRunes 是 cmd.exec/cmd.invoke 单参数截断上限：卡片 JSON、草稿正文
+// 可达数 KB，正文已各自留痕（msg.keep/pending），这里只需对得上调用形态。
+const cmdArgMaxRunes = 120
+
+// truncateArgs 逐参截断（不改原切片）。
+func truncateArgs(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = truncateRunes(a, cmdArgMaxRunes)
+	}
+	return out
+}
+
+// logCmd 把一次外部命令调用记入事件日志：成功 Debug（poller 每轮几十次
+// lark-cli，Info 级会淹没 events.log），失败 Error 始终落盘——补上 poller
+// 路径失败原本只到 stderr 的洞。返回值只记大小不记正文（成功 stdout 可达
+// 几十 KB；失败细节 ExecError/BookError 自带 stderr 片段）。
+func logCmd(bin string, args []string, dur time.Duration, outBytes int, err error) {
+	attrs := []any{"bin", bin, "args", truncateArgs(args), "ms", dur.Milliseconds(), "out_bytes", outBytes}
+	if err != nil {
+		evlog.Error("cmd.exec", append(attrs, "err", err.Error())...)
+		return
+	}
+	evlog.Debug("cmd.exec", attrs...)
+}
+
+// LogCmdInvoke 记录 lark-watch 自身子命令入口（main.dispatch 统一调用），
+// 与 LogCmdError 配对构成命令级审计面。
+func LogCmdInvoke(cmd string, args []string) {
+	evlog.Info("cmd.invoke", "cmd", cmd, "args", truncateArgs(args))
 }
 
 // logEmit 把每条 stdout 事件记入诊断日志（kind + 关键 id；正文已在 msg.keep 记过）。

@@ -339,13 +339,18 @@ func RunNotifyCommand(ctx context.Context, paths Paths, title, message, link str
 }
 
 // runNotifyScript 经 sh -c 执行脚本，消息字段由 LW_* 环境变量注入
-// （不拼进命令行，正文里的引号/元字符不会破坏脚本）。
+// （不拼进命令行，正文里的引号/元字符不会破坏脚本）。调用与结果经 logCmd
+// 留痕（env 不入档——正文已在 msg.keep 记过）。
 func runNotifyScript(ctx context.Context, script string, env ...string) error {
-	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	argv := []string{"-c", script}
+	cmd := exec.CommandContext(ctx, "sh", argv...)
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = os.Stderr // 通知命令输出走 stderr，不污染事件流
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	start := time.Now()
+	err := cmd.Run()
+	logCmd("sh", argv, time.Since(start), 0, err)
+	return err
 }
 
 // alerter 版内置通知（内置路径唯一实现）：通知中心横幅，不抢焦点、
@@ -487,12 +492,16 @@ func alerterVCArgs(title, message, link, icon string) (script string, args []str
 }
 
 // runShellCmd 以 sh -c 执行内置 shell 片段并阻塞至退出；值经位置参数传入
-// （$0 占位 "sh"），输出走 stderr，不污染事件流。
+// （$0 占位 "sh"），输出走 stderr，不污染事件流。调用与结果经 logCmd 留痕。
 func runShellCmd(ctx context.Context, script string, args []string) error {
-	cmd := exec.CommandContext(ctx, "sh", append([]string{"-c", script, "sh"}, args...)...)
+	argv := append([]string{"-c", script, "sh"}, args...)
+	cmd := exec.CommandContext(ctx, "sh", argv...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	start := time.Now()
+	err := cmd.Run()
+	logCmd("sh", argv, time.Since(start), 0, err)
+	return err
 }
 
 // startFailWindow 是 startShellCmd 捕捉秒退失败的观察窗口：启动即败（旗标
@@ -501,11 +510,20 @@ const startFailWindow = 500 * time.Millisecond
 
 // startShellCmd 同 runShellCmd 但只在启动窗口内短暂观察（send-card 短命进程
 // 场景），窗口内非零秒退返回错误，存活则放手——父进程退出后横幅与动作分发
-// 继续存活。
+// 继续存活。调用与观察窗结论经 logCmd 留痕（放行视为成功）。
 func startShellCmd(script string, args []string) error {
-	cmd := exec.Command("sh", append([]string{"-c", script, "sh"}, args...)...)
+	argv := append([]string{"-c", script, "sh"}, args...)
+	cmd := exec.Command("sh", argv...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
+	start := time.Now()
+	err := startAndWatch(cmd)
+	logCmd("sh", argv, time.Since(start), 0, err)
+	return err
+}
+
+// startAndWatch 启动并只在 startFailWindow 内观察秒退。
+func startAndWatch(cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}

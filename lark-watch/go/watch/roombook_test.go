@@ -1,7 +1,10 @@
 package watch
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -29,6 +32,35 @@ func TestParseBookSuccessUnparseable(t *testing.T) {
 		if !errors.As(err, &be) || be.Type != "parse" {
 			t.Errorf("%s: want parse BookError, got %v", name, err)
 		}
+	}
+}
+
+// Book 的 room CLI 调用在 cmd.exec 留痕（成功 Debug / 失败 Error）。
+func TestBookLogsCmdExec(t *testing.T) {
+	logs := captureEvlog(t)
+
+	stub := filepath.Join(t.TempDir(), "room")
+	envelope := `{"ok":true,"data":{"event_id":"ev_1","date":"2026-07-22","start_time":"14:00","end_time":"15:00","room":{"name":"301"}}}`
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho '"+envelope+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slot := BookSlot{Date: "07-22", Time: "14:00-15:00"}
+	if _, err := (&ExecRoomBooker{Bin: stub}).Book(context.Background(), slot, "会", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&ExecRoomBooker{Bin: "false"}).Book(context.Background(), slot, "会", nil); err == nil {
+		t.Fatal("false: want error")
+	}
+
+	recs := findLogs(logs(), "cmd.exec")
+	if len(recs) != 2 {
+		t.Fatalf("want 2 cmd.exec records, got %d: %v", len(recs), recs)
+	}
+	if r := recs[0]; r["level"] != "DEBUG" || r["bin"] != stub || r["out_bytes"].(float64) <= 0 {
+		t.Errorf("success record: %v", r)
+	}
+	if r := recs[1]; r["level"] != "ERROR" || r["err"] == nil {
+		t.Errorf("failure record: %v", r)
 	}
 }
 

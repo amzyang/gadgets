@@ -63,6 +63,8 @@ func dispatch(cmd string, args []string) error {
 	// 守护进程与短命令（send-card/status 等）并发追加同一文件，O_APPEND 保序。
 	closeEvlog := watch.InitEventLog(watch.DefaultPaths().StateDir)
 	defer closeEvlog()
+	// 子命令入口留痕（cmd.invoke），与出口的 cmd.error 配对构成命令级审计面。
+	watch.LogCmdInvoke(cmd, args)
 	err := run(cmd, args)
 	if err != nil {
 		// 命令级失败入档须在 closer 生效前——evlog 文件关闭后写入被 slog 吞掉。
