@@ -13,8 +13,8 @@ const (
 )
 
 const (
-	maxBannerActions   = 6  // 横幅下拉动作总数上限（含固定首键：发送/复制）
-	maxReactions       = 2  // 表情动作上限（保住常用语位置）
+	maxBannerActions   = 9  // 横幅下拉动作总数上限（含固定首键：发送/复制）
+	maxReactions       = 4  // 表情动作上限（保住常用语位置）
 	maxQuickLabelRunes = 20 // 下拉标签截断长度（发送内容仍是全文）
 )
 

@@ -51,11 +51,11 @@ func TestLoadQuickActionsConfig(t *testing.T) {
 func TestLoadQuickActionsBudget(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, "quick-replies", "一\n二\n三\n四\n五\n")
-	writeConfig(t, dir, "reactions", "THUMBSUP\nOK\nDONE\n")
+	writeConfig(t, dir, "reactions", "THUMBSUP\nOK\nDONE\nAPPLAUSE\nHEART\n")
 
 	acts := loadQuickActions(dir)
-	if len(acts) != 5 {
-		t.Fatalf("want 5 actions, got %v", acts)
+	if len(acts) != 8 {
+		t.Fatalf("want 8 actions, got %v", acts)
 	}
 	var texts, reacts int
 	for _, a := range acts {
@@ -65,7 +65,7 @@ func TestLoadQuickActionsBudget(t *testing.T) {
 			texts++
 		}
 	}
-	if texts != 3 || reacts != 2 {
-		t.Errorf("want 3 texts + 2 reacts, got %d/%d: %v", texts, reacts, acts)
+	if texts != 4 || reacts != 4 {
+		t.Errorf("want 4 texts + 4 reacts, got %d/%d: %v", texts, reacts, acts)
 	}
 }

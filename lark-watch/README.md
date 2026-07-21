@@ -67,6 +67,8 @@ Claude 会启动后台监控并常驻：P0 消息（私聊/@你/会议/重点人
 | `ignore` | 噪音正则，命中直接丢弃 |
 | `notify` | P0 通知配置（可选；缺省走 alerter 通知中心横幅，`off` 关闭，写脚本自定义），详见 SKILL.md |
 | `notify-vc` | 音视频会议专用通知命令（可选；缺省走 alerter 带「加入」按钮的横幅）|
+| `quick-replies` | 通知横幅的常用语快捷回复，每行一条，点选即回复对应消息 |
+| `reactions` | 通知横幅的表情回应，每行一个飞书 emoji_type，点选给消息贴表情 |
 
 状态存 `~/.local/state/lark-watch/lark-watch.db`（SQLite，只落本机）。
 
