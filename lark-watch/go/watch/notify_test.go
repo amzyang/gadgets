@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,80 @@ func TestRunNotifySuppressed(t *testing.T) {
 	if rang.Load() != 0 {
 		t.Errorf("bell rang %d times, want 0", rang.Load())
 	}
+}
+
+// assertMids 断言事件记录的 mids attr 恰为期望列表（JSON 数组解析为 []any）。
+func assertMids(t *testing.T, rec map[string]any, want ...string) {
+	t.Helper()
+	got, _ := rec["mids"].([]any)
+	if len(got) != len(want) {
+		t.Fatalf("mids: got %v, want %v", rec["mids"], want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("mids[%d] = %v, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// 抑制必须带 mids 入档：事后审计「横幅为什么没弹」要能按 mid 反查到具体消息，
+// 不能只剩无关联的 stderr 文本行。
+func TestNotifySuppressEvent(t *testing.T) {
+	logs := captureEvlog(t)
+	stubBell(t)
+	stubProbes(t, "com.electron.lark", 3)
+
+	RunNotify(context.Background(), t.TempDir(), "true", []Message{
+		{Mid: "om_s1", From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗"},
+	}, "")
+
+	recs := findLogs(logs(), "notify.suppress")
+	if len(recs) != 1 || recs[0]["level"] != "INFO" {
+		t.Fatalf("notify.suppress: %v", recs)
+	}
+	assertMids(t, recs[0], "om_s1")
+}
+
+// 发送失败按 kind（p0/vc/draft）+ mids + err 入档 Error 级：
+// `level=="ERROR"` 即审计失败面板，不再只能靠时间戳对齐前一条 notify.*。
+func TestNotifyFailEvents(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	batch := []Message{{Mid: "om_f1", From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗"}}
+
+	t.Run("p0 脚本失败", func(t *testing.T) {
+		logs := captureEvlog(t)
+		RunNotify(context.Background(), t.TempDir(), "exit 1", batch, "")
+		recs := findLogs(logs(), "notify.fail")
+		if len(recs) != 1 || recs[0]["kind"] != "p0" || recs[0]["level"] != "ERROR" || recs[0]["err"] == "" {
+			t.Fatalf("notify.fail: %v", recs)
+		}
+		assertMids(t, recs[0], "om_f1")
+	})
+
+	t.Run("vc 内置横幅失败", func(t *testing.T) {
+		logs := captureEvlog(t)
+		old := vcDialogFn
+		vcDialogFn = func(context.Context, string, string, string, string) error { return errors.New("boom") }
+		t.Cleanup(func() { vcDialogFn = old })
+		RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, batch, "")
+		recs := findLogs(logs(), "notify.fail")
+		if len(recs) != 1 || recs[0]["kind"] != "vc" || recs[0]["level"] != "ERROR" {
+			t.Fatalf("notify.fail vc: %v", recs)
+		}
+		assertMids(t, recs[0], "om_f1")
+	})
+
+	t.Run("draft 横幅缺 alerter", func(t *testing.T) {
+		logs := captureEvlog(t)
+		stubAlerter(t, "")
+		StartNotify(context.Background(), t.TempDir(), "", batch, "草稿", "om_f1", "")
+		recs := findLogs(logs(), "notify.fail")
+		if len(recs) != 1 || recs[0]["kind"] != "draft" || recs[0]["level"] != "ERROR" {
+			t.Fatalf("notify.fail draft: %v", recs)
+		}
+		assertMids(t, recs[0], "om_f1")
+	})
 }
 
 func TestParseBundleID(t *testing.T) {
@@ -262,7 +337,7 @@ func stubAlerter(t *testing.T, path string) {
 // alerter 草稿横幅：动作下拉 = 发送＋常用语＋表情（内置默认），「发送」回调
 // send-draft、常用语回调 send-text、表情回调 react、点正文 = 复制并跳转、
 // 60 秒超时。标签与值全走位置参数（≥10 花括号），脚本文本零用户内容；
-// 未安装 alerter 回退（ok=false）。
+// 未安装 alerter ok=false（通知跳过）。
 func TestAlerterDraftArgs(t *testing.T) {
 	stubAlerter(t, "/opt/bin/alerter")
 	// 空目录 = 内置默认动作：收到 / 好的，稍后回复 / 👍
@@ -306,16 +381,16 @@ func TestAlerterDraftArgs(t *testing.T) {
 
 	stubAlerter(t, "")
 	if _, _, ok := alerterDraftArgs(t.TempDir(), "t", "m", "l", "d", "om_1", ""); ok {
-		t.Error("no alerter should fall back to osascript")
+		t.Error("no alerter must return ok=false")
 	}
 }
 
 // alerter 通用/VC 横幅：有 mid 带快捷动作、无 mid 退回 plain 版（失败提示等
-// 无消息上下文场景）；复制内容优先候选话术；VC 点正文或「加入」即入会。
+// 无消息上下文场景）；复制内容为通知正文；VC 点正文或「加入」即入会。
 func TestAlerterGenericVCArgs(t *testing.T) {
 	stubAlerter(t, "/opt/bin/alerter")
 	dir := t.TempDir()
-	script, args, ok := alerterGenericArgs(dir, "t", "msg", "lark://x", "", "", "")
+	script, args, ok := alerterGenericArgs(dir, "t", "msg", "lark://x", "", "")
 	if !ok || script != alerterPlainScript("") || len(args) != 6 || args[3] != "msg" || args[5] != "" {
 		t.Errorf("no-mid generic: ok=%v script=%q args=%v", ok, script, args)
 	}
@@ -324,15 +399,12 @@ func TestAlerterGenericVCArgs(t *testing.T) {
 		t.Errorf("plain script missing %q:\n%s", want, script)
 	}
 	// plain 带 icon：旗标引用 $6、args 末位携带 URL
-	script, args, _ = alerterGenericArgs(dir, "t", "msg", "lark://x", "", "", "https://cdn/a.png")
+	script, args, _ = alerterGenericArgs(dir, "t", "msg", "lark://x", "", "https://cdn/a.png")
 	if !strings.Contains(script, `--ignore-dnd --app-icon "$6") || exit $?`) || args[5] != "https://cdn/a.png" {
 		t.Errorf("plain with icon: script=%q args=%v", script, args)
 	}
-	if _, args, _ := alerterGenericArgs(dir, "t", "msg", "", "话术", "", ""); args[3] != "话术" {
-		t.Errorf("draft should win copy text: %v", args)
-	}
 
-	script, args, ok = alerterGenericArgs(dir, "t", "msg", "lark://x", "", "om_9", "https://cdn/a.png")
+	script, args, ok = alerterGenericArgs(dir, "t", "msg", "lark://x", "om_9", "https://cdn/a.png")
 	if !ok || len(args) != 15 || args[6] != "om_9" || args[7] != "复制,收到,好的，稍后回复,👍 回应" || args[14] != "https://cdn/a.png" {
 		t.Fatalf("mid generic: ok=%v args=%v", ok, args)
 	}
@@ -368,34 +440,21 @@ func TestStartShellCmdEarlyExit(t *testing.T) {
 	}
 }
 
-// 草稿弹窗：正文展示消息摘要＋候选①全文；「忽略/复制并跳转/发送」三键，
-// 回车 = 发送、忽略兼任 cancel button（Esc 即忽略）、60 秒超时；「发送」回调
-// send-draft、「复制并跳转」复制候选①并 open applink；argv 序与脚本 item 引用一致。
-func TestBuiltinDraftNotifyArgs(t *testing.T) {
-	lines, argv, ok := builtinDraftNotifyArgs("标题", "摘要", "lark://x", "草稿内容", "om_1")
-	if !ok {
-		t.Fatal("want ok")
-	}
-	script := strings.Join(lines, "\n")
-	for _, want := range []string{
-		`{"忽略", "复制并跳转", "发送"}`, `default button "发送"`,
-		`cancel button "忽略"`, "giving up after 60",
-		"send-draft --mid", "set the clipboard to (item 3 of argv)",
+// 内置通知硬依赖 alerter：未装时返回安装指引错误（不再有 osascript 弹窗兜底），
+// 自动通知经调用方 logf、notify 子命令直接报给用户。
+func TestBuiltinNotifyNoAlerter(t *testing.T) {
+	stubAlerter(t, "")
+	for name, err := range map[string]error{
+		"generic": builtinNotify(context.Background(), t.TempDir(), "t", "m", "lark://x", "", ""),
+		"vc":      builtinNotifyVC(context.Background(), "t", "m", "lark://x", ""),
 	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("script missing %q:\n%s", want, script)
+		if err == nil || !strings.Contains(err.Error(), "alerter") {
+			t.Errorf("%s: want alerter-missing error, got %v", name, err)
 		}
-	}
-	if len(argv) != 6 || argv[0] != "摘要\n\n—— 回复草稿 ——\n草稿内容" ||
-		argv[1] != "标题" || argv[2] != "草稿内容" || argv[4] != "om_1" || argv[5] != "lark://x" {
-		t.Errorf("argv: %v", argv)
-	}
-	if _, _, ok := builtinDraftNotifyArgs("t", "m", "lark://x", "", "om_1"); ok {
-		t.Error("empty draft should fall back to generic popup")
 	}
 }
 
-// LoadNotifyScript：缺失 = 内置弹窗默认开（零配置）；空白/off = 总开关关闭；
+// LoadNotifyScript：缺失 = 内置横幅默认开（零配置）；空白/off = 总开关关闭；
 // 其余 = 自定义脚本。
 func TestLoadNotifyScript(t *testing.T) {
 	dir := t.TempDir()

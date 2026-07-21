@@ -73,6 +73,22 @@ func newTestPoller(t *testing.T, cli LarkCLI, now int64) (*Poller, *[][]byte) {
 	return p, &events
 }
 
+// flushDigest 读库失败必须留痕：原先静默 return，摘要丢失零痕迹。
+func TestFlushDigestTakeFailureLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	p, events := newTestPoller(t, &listFake{}, 1000)
+	p.Store.Close()
+
+	p.flushDigest()
+
+	if len(*events) != 0 {
+		t.Errorf("no digest expected, got %d", len(*events))
+	}
+	if !logsContain(logs(), "digest take failed") {
+		t.Error("digest take failure should be logged")
+	}
+}
+
 // 首 tick：所有会话懒初始化游标为 now，不拉取（不重放历史）。
 func TestTickLazyInit(t *testing.T) {
 	f := &listFake{chats: []ChatMeta{

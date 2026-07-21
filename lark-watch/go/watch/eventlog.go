@@ -49,6 +49,13 @@ func InitEventLog(stateDir string) func() {
 	return func() { w.Close() }
 }
 
+// LogCmdError 把顶层子命令失败记入事件日志（main.dispatch 出口统一调用，须在
+// evlog closer 生效前）：return err 路径原本只到 stderr（前台才可见），审计面
+// 必须留痕；命令级失败统一按 level=="ERROR" 过滤。
+func LogCmdError(cmd string, err error) {
+	evlog.Error("cmd.error", "cmd", cmd, "err", err.Error())
+}
+
 // logEmit 把每条 stdout 事件记入诊断日志（kind + 关键 id；正文已在 msg.keep 记过）。
 // attr 键避开 slog 保留的 msg/level/time（alert 正文用 text）。
 func logEmit(v any) {

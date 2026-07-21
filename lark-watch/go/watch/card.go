@@ -113,6 +113,15 @@ func (h *CardHandler) updateDoneCard(ev CardEvent, src string, st doneState, kee
 	}
 }
 
+// deletePending 删除 pending 并对失败留痕（与 commands.go deletePending 同语义，
+// 卡片链路走 cardLogf）：残留 pending 让事后卡片状态难解释，幂等键防双发，
+// 故只入档不阻断。
+func (h *CardHandler) deletePending(mid string) {
+	if err := h.Store.PendingDelete(mid); err != nil {
+		cardLogf("pending delete failed for %s: %v", mid, err)
+	}
+}
+
 // handleDraft 处理草稿确认卡的 send/ignore/copy 分支。
 func (h *CardHandler) handleDraft(ev CardEvent, act cardAction) {
 	drafts, format, cardSrc, hasPending := h.Store.PendingGet(act.Mid)
@@ -139,11 +148,11 @@ func (h *CardHandler) handleDraft(ev CardEvent, act cardAction) {
 			return
 		}
 		updateCard(doneSent, act.Idx)
-		h.Store.PendingDelete(act.Mid)
+		h.deletePending(act.Mid)
 		cardLogf("sent reply for %s (candidate %d)", act.Mid, act.Idx)
 	case "ignore":
 		updateCard(doneIgnored, -1)
-		h.Store.PendingDelete(act.Mid)
+		h.deletePending(act.Mid)
 		cardLogf("ignored %s", act.Mid)
 	case "copy":
 		if !hasPending {
@@ -175,7 +184,9 @@ func (h *CardHandler) handleBook(ev CardEvent, act cardAction, now int64) {
 	if act.Action == "book-ignore" {
 		bp, _ := h.Store.BookPendingGet(act.Mid)
 		h.updateDoneCard(ev, bp.Card, doneIgnored, -1)
-		h.Store.BookPendingDelete(act.Mid)
+		if err := h.Store.BookPendingDelete(act.Mid); err != nil {
+			cardLogf("book pending delete failed for %s: %v", act.Mid, err)
+		}
 		cardLogf("book card ignored for %s", act.Mid)
 		return
 	}

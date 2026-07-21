@@ -42,10 +42,10 @@ func usage() {
   ignore-add  追加噪音正则
   send-card   起草确认卡片（pending 入库 + 渲染 + bot 私发）
   send-book-card 预约意向卡片（点「预约」由卡片回调直接 room book）
-  send-draft  发送 pending 候选草稿（通知弹窗「发送」按钮的回调）
+  send-draft  发送 pending 候选草稿（通知横幅「发送」动作的回调）
   send-text   以常用语快捷回复源消息（通知横幅动作的回调）
   react       给源消息加表情回应（通知横幅动作的回调）
-  notify      发送系统通知（--title --message --link；优先 notify 配置脚本，缺省内置弹窗）
+  notify      发送系统通知（--title --message --link；优先 notify 配置脚本，缺省内置横幅，依赖 alerter）
   status      健康 JSON`)
 }
 
@@ -63,6 +63,15 @@ func dispatch(cmd string, args []string) error {
 	// 守护进程与短命令（send-card/status 等）并发追加同一文件，O_APPEND 保序。
 	closeEvlog := watch.InitEventLog(watch.DefaultPaths().StateDir)
 	defer closeEvlog()
+	err := run(cmd, args)
+	if err != nil {
+		// 命令级失败入档须在 closer 生效前——evlog 文件关闭后写入被 slog 吞掉。
+		watch.LogCmdError(cmd, err)
+	}
+	return err
+}
+
+func run(cmd string, args []string) error {
 	cli := &watch.ExecLarkCLI{}
 	switch cmd {
 	case "run", "poll":

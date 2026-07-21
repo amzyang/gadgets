@@ -538,7 +538,11 @@ func (p *Poller) markRestricted(ch ChatMeta, known bool, now int64) {
 
 func (p *Poller) flushDigest() {
 	msgs, err := p.Store.DigestTake()
-	if err != nil || len(msgs) == 0 {
+	if err != nil {
+		logf("digest take failed: %v", err)
+		return
+	}
+	if len(msgs) == 0 {
 		return
 	}
 	p.emit(BuildDigest(msgs))

@@ -18,6 +18,7 @@ type fakeCLI struct {
 	failUpdate    bool
 	failPatch     bool
 	failAvatar    bool
+	onReply       func() // ReplyAsUser 后置钩子：在命令中途注错（如关库）用
 	chatAvatarURL string
 	userAvatarURL string
 }
@@ -43,6 +44,9 @@ func (f *fakeCLI) EventConsumeCmd(ctx context.Context) *exec.Cmd {
 }
 func (f *fakeCLI) ReplyAsUser(mid, draft, format, idemKey string) error {
 	f.record("reply %s %s format=%s key=%s", mid, draft, format, idemKey)
+	if f.onReply != nil {
+		f.onReply()
+	}
 	if f.failReply {
 		return fmt.Errorf("api error")
 	}
@@ -102,6 +106,21 @@ func (f *fakeCLI) hasCall(substr string) bool {
 }
 
 const testCardContent = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"原文"},{"tag":"button"},{"tag":"button"}]}}`
+
+// 卡片链路 PendingDelete 失败不再静默（与 send-draft 同一盲区，行为仍 best-effort）。
+func TestHandleDraftPendingDeleteFailureLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	s := openTestStore(t)
+	h := &CardHandler{Store: s, CLI: &fakeCLI{}, Self: "ou_SELF"}
+	s.PendingPut("om_cd", []string{"候选"}, "text", testCardContent, 1)
+	s.Close()
+
+	h.handleDraft(CardEvent{EventID: "ev_cd"}, cardAction{Action: "ignore", Mid: "om_cd"})
+
+	if !logsContain(logs(), "pending delete failed") {
+		t.Error("pending delete failure should be logged")
+	}
+}
 
 func cardEvent(eventID, token, action, mid string) []byte {
 	return []byte(fmt.Sprintf(

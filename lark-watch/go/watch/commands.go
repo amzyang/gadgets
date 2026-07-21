@@ -173,6 +173,8 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 		}
 	}
 	logf("draft card sent for %s", mid)
+	// 草稿链路的结构化锚点：模型侧起草不经 Go，发卡即该环节在 events.log 的落点。
+	evlog.Info("card.sent", "mid", mid, "drafts", len(drafts), "format", format)
 	// 草稿已就绪：认领并展示同会话被延迟的系统通知。查无延迟条目
 	// （已超时弹出 / 通知已关闭 / 补课路径）则静默跳过，不会重复弹。
 	// 等草稿期间本人已亲自回复的也不再弹（卡片照发——草稿仍可能有参考
@@ -181,7 +183,7 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 		script, enabled := LoadNotifyScript(paths.ConfigDir)
 		evlog.Info("notify.claim", "mid", mid, "n", len(msgs), "script", script != "", "enabled", enabled)
 		if msgs = dropReplied(s, msgs); len(msgs) > 0 && enabled {
-			// 候选①与 pending 键随通知下发：弹窗「复制」给待发话术、「发送」直接回复。
+			// 候选①与 pending 键随通知下发：横幅「发送」直接回复、点正文复制待发话术。
 			icon := (&avatarResolver{CLI: cli, Store: s}).Resolve(msgs)
 			StartNotify(context.Background(), paths.ConfigDir, script, msgs, drafts[0], mid, icon)
 		}
@@ -238,6 +240,7 @@ func RunSendBookCard(s *Store, cli LarkCLI, mid string, slots []BookSlot, title 
 		return fmt.Errorf("send book card failed: %w", err)
 	}
 	logf("book card sent for %s (%d slot(s))", mid, len(slots))
+	evlog.Info("card.book_sent", "mid", mid, "slots", len(slots))
 	return nil
 }
 
@@ -268,6 +271,25 @@ func markCardDone(s *Store, cli LarkCLI, mid string, st doneState, keepIdx int) 
 	}
 	if err := cli.PatchCard(cardMid, newCard); err != nil {
 		logf("card patch failed for %s: %v", mid, err)
+		return
+	}
+	evlog.Debug("card.done", "mid", mid, "state", st.title)
+}
+
+// alertUser 弹结果提示横幅（send-draft/send-text/react 的失效/失败提示）。
+// 弹窗场景无终端，提示横幅是最后的可观测通道——它自身失败也必须留痕
+// （仍 best-effort，不影响主流程结果）。
+func alertUser(ctx context.Context, configDir, title, message string) {
+	if err := sendDraftAlertFn(ctx, configDir, title, message); err != nil {
+		logf("result alert failed: %v", err)
+	}
+}
+
+// deletePending 删除 pending 并对失败留痕：删除失败会残留「看似待处理」的草稿，
+// 事后卡片状态难解释；幂等键保证不会双发，故只入档不上抛。
+func deletePending(s *Store, mid string) {
+	if err := s.PendingDelete(mid); err != nil {
+		logf("pending delete failed for %s: %v", mid, err)
 	}
 }
 
@@ -279,7 +301,7 @@ func markCardDone(s *Store, cli LarkCLI, mid string, st doneState, keepIdx int) 
 func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid string, idx int) error {
 	drafts, format, _, ok := s.PendingGet(mid)
 	if !ok {
-		sendDraftAlertFn(ctx, paths.ConfigDir, "草稿已失效", "草稿不存在或已处理（可能已在卡片端发送/忽略）")
+		alertUser(ctx, paths.ConfigDir, "草稿已失效", "草稿不存在或已处理（可能已在卡片端发送/忽略）")
 		return fmt.Errorf("no pending draft for %s", mid)
 	}
 	if idx < 0 || idx >= len(drafts) {
@@ -287,11 +309,11 @@ func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid s
 	}
 	if err := cli.ReplyAsUser(mid, drafts[idx], format, mid); err != nil {
 		evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", false)
-		sendDraftAlertFn(ctx, paths.ConfigDir, "回复发送失败", "草稿发送失败，请回终端或卡片处理")
+		alertUser(ctx, paths.ConfigDir, "回复发送失败", "草稿发送失败，请回终端或卡片处理")
 		return err
 	}
 	markCardDone(s, cli, mid, doneSent, idx)
-	s.PendingDelete(mid)
+	deletePending(s, mid)
 	evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", true)
 	logf("sent reply for %s (candidate %d, via popup)", mid, idx)
 	return nil
@@ -313,11 +335,11 @@ func quickIdemKey(mid, text string) string {
 func RunSendText(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid, text string) error {
 	if err := cli.ReplyAsUser(mid, text, "text", quickIdemKey(mid, text)); err != nil {
 		evlog.Info("popup.qreply", "mid", mid, "ok", false)
-		sendDraftAlertFn(ctx, paths.ConfigDir, "快捷回复失败", "常用语发送失败，请回终端或飞书处理")
+		alertUser(ctx, paths.ConfigDir, "快捷回复失败", "常用语发送失败，请回终端或飞书处理")
 		return err
 	}
 	markCardDone(s, cli, mid, doneQuick, -1)
-	s.PendingDelete(mid)
+	deletePending(s, mid)
 	evlog.Info("popup.qreply", "mid", mid, "ok", true)
 	logf("sent quick reply for %s", mid)
 	return nil
@@ -331,7 +353,7 @@ func RunReact(ctx context.Context, cli LarkCLI, paths Paths, mid, emoji string) 
 	}
 	if err := cli.ReactAsUser(mid, emoji); err != nil {
 		evlog.Info("popup.react", "mid", mid, "emoji", emoji, "ok", false)
-		sendDraftAlertFn(ctx, paths.ConfigDir, "表情回应失败", "表情回应发送失败，请回飞书处理")
+		alertUser(ctx, paths.ConfigDir, "表情回应失败", "表情回应发送失败，请回飞书处理")
 		return err
 	}
 	evlog.Info("popup.react", "mid", mid, "emoji", emoji, "ok", true)

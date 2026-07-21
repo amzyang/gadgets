@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,8 +10,10 @@ import (
 	"time"
 )
 
-// send-card 多候选：逐个读文件、pending 入库多条、卡片含各候选的发送按钮。
+// send-card 多候选：逐个读文件、pending 入库多条、卡片含各候选的发送按钮；
+// 成功后记 card.sent 结构化锚点（草稿链路按 mid join 的落点）。
 func TestRunSendCardMulti(t *testing.T) {
+	logs := captureEvlog(t)
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	dir := t.TempDir()
@@ -21,6 +24,11 @@ func TestRunSendCardMulti(t *testing.T) {
 
 	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_sc", []string{p1, p2}, "原消息", "张三", "私聊", "12:00", "text", ""); err != nil {
 		t.Fatal(err)
+	}
+	sent := findLogs(logs(), "card.sent")
+	if len(sent) != 1 || sent[0]["mid"] != "om_sc" || sent[0]["drafts"] != float64(2) ||
+		sent[0]["format"] != "text" || sent[0]["level"] != "INFO" {
+		t.Errorf("card.sent: %v", sent)
 	}
 	drafts, format, card, ok := s.PendingGet("om_sc")
 	if !ok || len(drafts) != 2 || drafts[0] != "候选一" || drafts[1] != "候选二" || format != "text" {
@@ -206,8 +214,9 @@ func stubSendDraftAlert(t *testing.T) *[]string {
 
 // send-draft（弹窗「发送」回调）：按 idx 发送 pending 候选并删除 pending，
 // 语义与卡片「发送」一致（幂等键 = 源消息 mid）；成功后按 card_mid 改卡
-// 「已发送」（只留所发候选，按钮剥除）。
+// 「已发送」（只留所发候选，按钮剥除），改卡成功记 Debug 级 card.done。
 func TestRunSendDraft(t *testing.T) {
+	logs := captureEvlog(t)
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	stubSendDraftAlert(t)
@@ -217,6 +226,10 @@ func TestRunSendDraft(t *testing.T) {
 
 	if err := RunSendDraft(context.Background(), s, cli, Paths{ConfigDir: t.TempDir()}, "om_p1", 0); err != nil {
 		t.Fatal(err)
+	}
+	done := findLogs(logs(), "card.done")
+	if len(done) != 1 || done[0]["mid"] != "om_p1" || done[0]["state"] != "回复已发送" || done[0]["level"] != "DEBUG" {
+		t.Errorf("card.done: %v", done)
 	}
 	if !cli.hasCall("reply om_p1 候选一 format=text key=om_p1") {
 		t.Errorf("reply args wrong: %v", cli.calls)
@@ -289,6 +302,40 @@ func TestRunSendDraftErrors(t *testing.T) {
 	}
 	if len(*alerts) != 2 || (*alerts)[0] != "草稿已失效" || (*alerts)[1] != "回复发送失败" {
 		t.Errorf("alerts: %v", *alerts)
+	}
+}
+
+// PendingDelete 失败不再静默：pending 残留会让后续卡片状态难解释，必须留痕
+// （行为仍 best-effort：回复已发出，错误只入档不上抛）。
+func TestRunSendDraftPendingDeleteFailureLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	stubSendDraftAlert(t)
+	s.PendingPut("om_pd", []string{"候选"}, "text", "{}", 1)
+	cli.onReply = func() { s.Close() } // PendingGet 之后、PendingDelete 之前关库注错
+
+	if err := RunSendDraft(context.Background(), s, cli, Paths{ConfigDir: t.TempDir()}, "om_pd", 0); err != nil {
+		t.Fatalf("delete failure must not fail the send: %v", err)
+	}
+	if !logsContain(logs(), "pending delete failed") {
+		t.Error("pending delete failure should be logged")
+	}
+}
+
+// 提示横幅自身失败也要留痕：弹窗场景无终端，提示横幅是最后的可观测通道。
+func TestResultAlertFailureLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	s := openTestStore(t)
+	old := sendDraftAlertFn
+	sendDraftAlertFn = func(context.Context, string, string, string) error { return errors.New("alerter gone") }
+	t.Cleanup(func() { sendDraftAlertFn = old })
+
+	if err := RunSendDraft(context.Background(), s, &fakeCLI{}, Paths{ConfigDir: t.TempDir()}, "om_none", 0); err == nil {
+		t.Error("missing pending should error")
+	}
+	if !logsContain(logs(), "result alert failed") {
+		t.Error("alert failure should be logged")
 	}
 }
 
@@ -430,14 +477,19 @@ func TestRunSendBookCardRejectsOpenID(t *testing.T) {
 	}
 }
 
-// 发卡即固化预订参数入库；卡片经 bot 私发给本人。
+// 发卡即固化预订参数入库；卡片经 bot 私发给本人；成功记 card.book_sent 锚点。
 func TestRunSendBookCard(t *testing.T) {
+	logs := captureEvlog(t)
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	slots := []BookSlot{{Date: "07-22", Time: "14:00-15:00"}}
 
 	if err := RunSendBookCard(s, cli, "om_sb1", slots, "对齐会", []string{"alice@corp.com"}, "约个会", "张三", "私聊", "12:03"); err != nil {
 		t.Fatal(err)
+	}
+	sent := findLogs(logs(), "card.book_sent")
+	if len(sent) != 1 || sent[0]["mid"] != "om_sb1" || sent[0]["slots"] != float64(1) || sent[0]["level"] != "INFO" {
+		t.Errorf("card.book_sent: %v", sent)
 	}
 	bp, ok := s.BookPendingGet("om_sb1")
 	if !ok || bp.Title != "对齐会" || len(bp.Slots) != 1 || bp.Participants[0] != "alice@corp.com" {

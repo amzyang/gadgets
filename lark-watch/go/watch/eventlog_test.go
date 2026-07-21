@@ -3,9 +3,11 @@ package watch
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -60,6 +62,16 @@ func parseLogLines(t *testing.T, data []byte) []map[string]any {
 		out = append(out, m)
 	}
 	return out
+}
+
+// logsContain 判断是否存在 msg 含指定子串的记录（logf/cardLogf 文本行断言用）。
+func logsContain(recs []map[string]any, substr string) bool {
+	for _, r := range recs {
+		if s, _ := r["msg"].(string); strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // findLogs 过滤出指定 msg 的日志行。
@@ -212,6 +224,23 @@ func TestLogfTee(t *testing.T) {
 	}
 	if r := recs[1]; r["msg"] != "world x" || r["component"] != "card" {
 		t.Errorf("cardLogf tee: %v", r)
+	}
+}
+
+// cmd.error：顶层子命令 return err 原本只到 stderr，审计必须在 events.log
+// 留痕（Error 级 + cmd/err attrs，`level=="ERROR"` 可过滤全部命令级失败）。
+func TestLogCmdError(t *testing.T) {
+	logs := captureEvlog(t)
+
+	LogCmdError("send-card", errors.New("send card failed: boom"))
+
+	recs := findLogs(logs(), "cmd.error")
+	if len(recs) != 1 {
+		t.Fatalf("want 1 cmd.error record, got %v", recs)
+	}
+	r := recs[0]
+	if r["level"] != "ERROR" || r["cmd"] != "send-card" || r["err"] != "send card failed: boom" {
+		t.Errorf("cmd.error fields: %v", r)
 	}
 }
 
