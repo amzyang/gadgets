@@ -11,11 +11,11 @@ func TestLoadQuickActionsDefaults(t *testing.T) {
 	if len(acts) != 3 {
 		t.Fatalf("want 2 replies + 1 reaction, got %v", acts)
 	}
-	if acts[0].Kind != "text" || acts[0].Value != "收到" ||
+	if acts[0].Cmd != CmdSendText || acts[0].Flag != FlagText || acts[0].Value != "收到" ||
 		acts[1].Value != "好的，稍后回复" {
 		t.Errorf("default replies: %v", acts)
 	}
-	if acts[2].Kind != "react" || acts[2].Value != "THUMBSUP" || acts[2].Label != "👍 回应" {
+	if acts[2].Cmd != CmdReact || acts[2].Flag != FlagEmoji || acts[2].Value != "THUMBSUP" || acts[2].Label != "👍 回应" {
 		t.Errorf("default reaction: %v", acts[2])
 	}
 }
@@ -42,7 +42,7 @@ func TestLoadQuickActionsConfig(t *testing.T) {
 	if long.Value != strings.Repeat("很", 25) {
 		t.Errorf("value must keep full text: %+v", long)
 	}
-	if acts[2].Kind != "react" || acts[2].Value != "DONE" || acts[2].Label != "✅ 回应" {
+	if acts[2].Cmd != CmdReact || acts[2].Value != "DONE" || acts[2].Label != "✅ 回应" {
 		t.Errorf("reaction: %+v", acts[2])
 	}
 }
@@ -59,7 +59,7 @@ func TestLoadQuickActionsBudget(t *testing.T) {
 	}
 	var texts, reacts int
 	for _, a := range acts {
-		if a.Kind == "react" {
+		if a.Cmd == CmdReact {
 			reacts++
 		} else {
 			texts++

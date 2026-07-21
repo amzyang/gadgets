@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 )
@@ -214,11 +215,14 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 	collect := func(msgs []Message) error {
 		mergeSelfLast(selfLast, SelfLastTimes(msgs, rules.Self))
 		kept, dropped := rules.ClassifyAll(msgs)
+		// debug 级先问 Enabled 再构造 attrs：self 丢弃是大宗噪音（回看窗口内
+		// 每 tick 重复），默认 Info 级下不白付 msgAttrs 的分配
+		debugOn := evlog.Enabled(ctx, slog.LevelDebug)
 		for _, m := range dropped {
-			if m.Reason == "self" {
-				evlog.Debug("msg.drop", msgAttrs(m)...) // 大宗噪音（回看窗口内每 tick 重复），降 debug
-			} else {
+			if m.Reason != "self" {
 				evlog.Info("msg.drop", msgAttrs(m)...) // ignore/empty/non-user：诊断价值高，重复可接受
+			} else if debugOn {
+				evlog.Debug("msg.drop", msgAttrs(m)...)
 			}
 		}
 		fresh, err := s.FilterNewMessages(kept, nowEpoch, SeenMax())
@@ -227,13 +231,16 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 		}
 		if len(fresh) < len(kept) {
 			dups += len(kept) - len(fresh)
-			freshSet := make(map[string]bool, len(fresh))
-			for _, m := range fresh {
-				freshSet[m.Mid] = true
-			}
-			for _, m := range kept {
-				if !freshSet[m.Mid] {
-					evlog.Debug("msg.dup", "mid", m.Mid, "cid", m.Cid)
+			// 重复明细只喂 debug 日志；默认 Info 级下跳过 freshSet 构建
+			if evlog.Enabled(ctx, slog.LevelDebug) {
+				freshSet := make(map[string]bool, len(fresh))
+				for _, m := range fresh {
+					freshSet[m.Mid] = true
+				}
+				for _, m := range kept {
+					if !freshSet[m.Mid] {
+						evlog.Debug("msg.dup", "mid", m.Mid, "cid", m.Cid)
+					}
 				}
 			}
 		}
@@ -243,7 +250,7 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 			case m.P != "P0":
 				p1 = append(p1, m)
 				continue
-			case vcTypes[m.Type]:
+			case m.realtime():
 				p.emit(m) // 音视频会议实时性最强：跳过聚合与 replied，拉到即发
 			default:
 				p0Buf = append(p0Buf, m)
@@ -395,7 +402,7 @@ func MarkReplied(events []Message, selfLast map[string]string) []Message {
 func notifyBatch(p0 []Message, selfLast map[string]string) []Message {
 	out := make([]Message, 0, len(p0))
 	for _, m := range p0 {
-		if !vcTypes[m.Type] && selfRepliedAfter(selfLast, m.Cid, m.T) {
+		if !m.realtime() && selfRepliedAfter(selfLast, m.Cid, m.T) {
 			continue
 		}
 		out = append(out, m)
@@ -410,7 +417,7 @@ func notifyBatch(p0 []Message, selfLast map[string]string) []Message {
 func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Message, now int64) {
 	var vc, rest []Message
 	for _, m := range batch {
-		if vcTypes[m.Type] {
+		if m.realtime() {
 			vc = append(vc, m)
 		} else {
 			rest = append(rest, m)

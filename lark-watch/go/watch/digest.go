@@ -18,8 +18,8 @@ func BuildDigest(msgs []Message) Digest {
 			g = &group{latest: m}
 			groups[m.Cid] = g
 		}
-		if g.chat == "" && m.Chat != nil {
-			g.chat = *m.Chat
+		if g.chat == "" {
+			g.chat = deref(m.Chat)
 		}
 		if m.T >= g.latest.T {
 			g.latest = m

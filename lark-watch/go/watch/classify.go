@@ -97,6 +97,10 @@ func loadPatterns(path string) []*regexp.Regexp {
 // 这类消息 content 常为空，豁免空文本丢弃。
 var vcTypes = map[string]bool{"video_chat": true, "vc_meeting": true}
 
+// realtime 是音视频会议消息的路由语义：实时性最强，跳过聚合、replied 抑制
+// 与延迟通知，拉到即弹。poller 各分流点共用此判据，不各自查 vcTypes。
+func (m Message) realtime() bool { return vcTypes[m.Type] }
+
 // Classify 对单条消息定级。返回 (打好 p 标签的消息, 是否保留)，Reason 恒填
 // 判定理由（诊断日志用，json:"-" 不进事件流）。
 // 丢弃：自己发的 / 非 user 发送者 / 空文本（音视频会议除外）/ ignore 命中
@@ -116,11 +120,13 @@ func (r Rules) Classify(m Message) (Message, bool) {
 		m.Reason = "empty"
 		return m, false
 	}
-	blob := m.Cid + " " + deref(m.Chat) + " " + deref(m.From) + " " + m.Text
-	for _, re := range r.Ignore {
-		if re.MatchString(blob) {
-			m.Reason = "ignore:" + re.String()
-			return m, false
+	if len(r.Ignore) > 0 {
+		blob := m.Cid + " " + deref(m.Chat) + " " + deref(m.From) + " " + m.Text
+		for _, re := range r.Ignore {
+			if re.MatchString(blob) {
+				m.Reason = "ignore:" + re.String()
+				return m, false
+			}
 		}
 	}
 	m.P = "P0"

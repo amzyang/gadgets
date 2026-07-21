@@ -428,7 +428,7 @@ func (s *Store) NotifyDeferTakeDue(now int64) ([]Message, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	out, err := notifyWaitScan(tx.Query(
+	out, err := scanMessages(tx.Query(
 		`SELECT msg FROM notify_wait
 		 WHERE cid IN (SELECT cid FROM notify_wait WHERE due <= ?) ORDER BY rowid`, now))
 	if err != nil {
@@ -458,7 +458,7 @@ func (s *Store) NotifyDeferClaimChat(mid string) ([]Message, bool) {
 	if err := tx.QueryRow(`SELECT cid FROM notify_wait WHERE mid = ?`, mid).Scan(&cid); err != nil {
 		return nil, false
 	}
-	out, err := notifyWaitScan(tx.Query(
+	out, err := scanMessages(tx.Query(
 		`SELECT msg FROM notify_wait WHERE cid = ? ORDER BY rowid`, cid))
 	if err != nil {
 		return nil, false
@@ -480,8 +480,9 @@ func (s *Store) NotifyDeferPurge(before int64) int {
 	return int(n)
 }
 
-// notifyWaitScan 把 notify_wait 查询结果解码为消息列表（插入序即时间序）。
-func notifyWaitScan(rows *sql.Rows, err error) ([]Message, error) {
+// scanMessages 把 `SELECT msg` 查询结果解码为消息列表（插入序即时间序；
+// notify_wait 与 digest_buf 共用）。
+func scanMessages(rows *sql.Rows, err error) ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -531,26 +532,8 @@ func (s *Store) DigestTake() ([]Message, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT msg FROM digest_buf ORDER BY id`)
+	out, err := scanMessages(tx.Query(`SELECT msg FROM digest_buf ORDER BY id`))
 	if err != nil {
-		return nil, err
-	}
-	var out []Message
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		var m Message
-		if err := json.Unmarshal([]byte(raw), &m); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(`DELETE FROM digest_buf`); err != nil {

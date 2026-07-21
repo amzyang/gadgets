@@ -29,11 +29,11 @@ func CatchupGroup(msgs []Message, cursors map[string]string, floor string, peek 
 		chat, p0 := "", 0
 		var fromName string
 		for _, m := range g {
-			if chat == "" && m.Chat != nil {
-				chat = *m.Chat
+			if chat == "" {
+				chat = deref(m.Chat)
 			}
-			if fromName == "" && m.From != nil {
-				fromName = *m.From
+			if fromName == "" {
+				fromName = deref(m.From)
 			}
 			if m.P == "P0" {
 				p0++

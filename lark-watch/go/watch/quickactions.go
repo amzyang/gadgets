@@ -34,10 +34,13 @@ var reactionLabels = map[string]string{
 // emojiTypeRe 校验 reactions 配置行（飞书 emoji_type 形如 THUMBSUP/OK）。
 var emojiTypeRe = regexp.MustCompile(`^[A-Z0-9_]+$`)
 
-// quickAction 是通知横幅下拉里的一个快捷动作。
+// quickAction 是通知横幅下拉里的一个快捷动作，携带回调规格：
+// alerter 分发片段据此拼 `<Cmd> --mid <mid> --<Flag> <Value>`，
+// 新增动作种类只改这里的构造，不动脚本生成器。
 type quickAction struct {
 	Label string // 下拉文案（已清洗：逗号转中文、超长截断）
-	Kind  string // "text"（常用语回复）| "react"（表情回应）
+	Cmd   string // 回调子命令（CmdSendText | CmdReact）
+	Flag  string // 值参数的 flag 名（FlagText | FlagEmoji）
 	Value string // 常用语全文（保留原始逗号）或 EMOJI_TYPE
 }
 
@@ -70,7 +73,7 @@ func loadQuickActions(configDir string) []quickAction {
 		if len(reacts) == maxReactions {
 			break
 		}
-		reacts = append(reacts, quickAction{Label: reactionLabel(r), Kind: "react", Value: r})
+		reacts = append(reacts, quickAction{Label: reactionLabel(r), Cmd: CmdReact, Flag: FlagEmoji, Value: r})
 	}
 	if n := len(reacts); n > budget {
 		reacts = reacts[:budget]
@@ -96,7 +99,7 @@ func loadQuickActions(configDir string) []quickAction {
 			continue
 		}
 		seen[label] = true
-		out = append(out, quickAction{Label: label, Kind: "text", Value: text})
+		out = append(out, quickAction{Label: label, Cmd: CmdSendText, Flag: FlagText, Value: text})
 	}
 	for _, r := range reacts {
 		if seen[r.Label] {

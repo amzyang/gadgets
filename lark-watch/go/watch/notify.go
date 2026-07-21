@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -173,6 +174,17 @@ func parseHIDIdleSecs(s string) float64 {
 	return ns / 1e9
 }
 
+// notifyGate 是通知统一前置：飞书前台且用户活跃时抑制（返回 false），否则
+// 响铃放行。RunNotify/RunNotifyVC/StartNotify 共用，抑制与响铃语义不分叉。
+func notifyGate(ctx context.Context) bool {
+	if shouldSuppressNotify(ctx) {
+		logf("notify suppressed: Lark frontmost and user active")
+		return false
+	}
+	bellFn(ctx)
+	return true
+}
+
 // RunNotify 展示 P0 批次通知，聚合整个批次为一次调用；执行前先响铃。
 // script 为空走内置「忽略/复制/跳转」弹窗；非空经 sh -c 执行，环境变量：
 // LW_TITLE 标题（多条带条数）、LW_MESSAGE/LW_SUMMARY 每条一行的聚合摘要、
@@ -181,11 +193,9 @@ func parseHIDIdleSecs(s string) float64 {
 // （见 shouldSuppressNotify）。同步阻塞至命令退出——弹窗会等用户点击，
 // 调用方需自行 go；ctx 取消时子进程被终止。
 func RunNotify(ctx context.Context, configDir, script string, batch []Message) {
-	if shouldSuppressNotify(ctx) {
-		logf("notify suppressed: Lark frontmost and user active")
+	if !notifyGate(ctx) {
 		return
 	}
-	bellFn(ctx)
 	var err error
 	if script == "" {
 		// 快捷动作落在批次代表消息上（最后一条，与 send-card --mid 惯例一致）
@@ -205,11 +215,9 @@ func RunNotify(ctx context.Context, configDir, script string, batch []Message) {
 // 内置「忽略/加入」弹窗。抑制与响铃语义同 RunNotify；同步阻塞至弹窗关闭，
 // 调用方需自行 go。
 func RunNotifyVC(ctx context.Context, paths Paths, batch []Message) {
-	if shouldSuppressNotify(ctx) {
-		logf("notify suppressed: Lark frontmost and user active")
+	if !notifyGate(ctx) {
 		return
 	}
-	bellFn(ctx)
 	var err error
 	if script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify-vc")); script != "" {
 		err = runNotifyScript(ctx, script, batchNotifyEnv(vcNotifyTitle, batch)...)
@@ -228,11 +236,9 @@ func RunNotifyVC(ctx context.Context, paths Paths, batch []Message) {
 // 「复制并跳转」复制待发的回复并进飞书，「发送」调回本二进制 send-draft 直接
 // 以候选①回复对方（不必切回飞书）；自定义脚本经 LW_DRAFT/LW_MID 拿到同一信息。
 func StartNotify(ctx context.Context, configDir, script string, batch []Message, draft, mid string) {
-	if shouldSuppressNotify(ctx) {
-		logf("notify suppressed: Lark frontmost and user active")
+	if !notifyGate(ctx) {
 		return
 	}
-	bellFn(ctx)
 	var err error
 	if script == "" {
 		title, summary := batchTitle(p0NotifyTitle, len(batch)), batchSummary(batch)
@@ -367,10 +373,7 @@ func alerterActionScript(draft bool, actions []quickAction) string {
 	b.WriteString(`case "$out" in` + "\n")
 	b.WriteString(first + "\n")
 	for i, a := range actions {
-		verb := fmt.Sprintf("%s --%s %s --%s", CmdSendText, FlagMid, midRef, FlagText)
-		if a.Kind == "react" {
-			verb = fmt.Sprintf("%s --%s %s --%s", CmdReact, FlagMid, midRef, FlagEmoji)
-		}
+		verb := fmt.Sprintf("%s --%s %s --%s", a.Cmd, FlagMid, midRef, a.Flag)
 		fmt.Fprintf(&b, "%s) exec %s %s %s ;;\n",
 			posParam(9+2*i), exeRef, verb, posParam(10+2*i))
 	}
@@ -408,8 +411,7 @@ func alerterDraftArgs(configDir, title, message, link, draft, mid string) (scrip
 		return "", nil, false
 	}
 	actions := loadQuickActions(configDir)
-	text := message + "\n\n—— 回复草稿 ——\n" + draft
-	args = []string{ap, title, text, exe, mid, draft, link, actionsCSV("发送", actions)}
+	args = []string{ap, title, draftBody(message, draft), exe, mid, draft, link, actionsCSV("发送", actions)}
 	for _, a := range actions {
 		args = append(args, a.Label, a.Value)
 	}
@@ -427,10 +429,7 @@ func alerterGenericArgs(configDir, title, message, link, draft, mid string) (scr
 	if ap == "" {
 		return "", nil, false
 	}
-	copyText := draft
-	if copyText == "" {
-		copyText = message
-	}
+	copyText := cmp.Or(draft, message)
 	exe, err := os.Executable()
 	if mid == "" || err != nil {
 		return alerterPlainScript, []string{ap, title, message, copyText, link}, true
@@ -510,16 +509,17 @@ func builtinDraftNotifyArgs(title, message, link, draft, mid string) (lines, arg
 		"end try",
 		"end run",
 	}
-	dialogText := message + "\n\n—— 回复草稿 ——\n" + draft
-	return lines, []string{dialogText, title, draft, exe, mid, link}, true
+	return lines, []string{draftBody(message, draft), title, draft, exe, mid, link}, true
+}
+
+// draftBody 是草稿通知正文：对方消息摘要＋候选①全文（横幅与弹窗共用同一分隔符）。
+func draftBody(message, draft string) string {
+	return message + "\n\n—— 回复草稿 ——\n" + draft
 }
 
 // builtinNotifyArgs 组装内置弹窗的 AppleScript 与 argv（见 builtinNotify）。
 func builtinNotifyArgs(title, message, link, draft string) (lines, argv []string) {
-	copyText := draft
-	if copyText == "" {
-		copyText = message
-	}
+	copyText := cmp.Or(draft, message)
 	lines = []string{
 		"on run argv",
 		"try",
