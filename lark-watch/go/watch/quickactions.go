@@ -13,8 +13,8 @@ const (
 )
 
 const (
-	maxBannerActions   = 9  // 横幅下拉动作总数上限（含固定首键：发送/复制）
-	maxReactions       = 4  // 表情动作上限（保住常用语位置）
+	maxBannerActions   = 21 // 横幅下拉动作总数上限（含固定首键：发送/复制）
+	maxReactions       = 10 // 表情动作上限（保住常用语位置：余量恰容 10 条常用语）
 	maxQuickLabelRunes = 20 // 下拉标签截断长度（发送内容仍是全文）
 )
 
@@ -24,15 +24,17 @@ var (
 	defaultReactions    = []string{"THUMBSUP"}
 )
 
-// reactionLabels 是 EMOJI_TYPE → 下拉显示标签；查不到用原文（飞书 emoji key
+// reactionLabels 是 emoji_type → 下拉显示标签；查不到用原文（飞书 emoji key
 // 全集很大，只映射常用的）。
 var reactionLabels = map[string]string{
 	"THUMBSUP": "👍", "OK": "👌", "DONE": "✅", "APPLAUSE": "👏",
 	"HEART": "❤️", "THANKS": "🙏", "JIAYI": "+1",
+	"Get": "收到", "FINGERHEART": "🫰", "Yes": "YES",
 }
 
-// emojiTypeRe 校验 reactions 配置行（飞书 emoji_type 形如 THUMBSUP/OK）。
-var emojiTypeRe = regexp.MustCompile(`^[A-Z0-9_]+$`)
+// emojiTypeRe 校验 reactions 配置行（飞书 emoji_type 多为全大写如 THUMBSUP/OK，
+// 但存在 Get/Yes 等混合大小写 key，经 API 实测有效）。
+var emojiTypeRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // quickAction 是通知横幅下拉里的一个快捷动作，携带回调规格：
 // alerter 分发片段据此拼 `<Cmd> --mid <mid> --<Flag> <Value>`，

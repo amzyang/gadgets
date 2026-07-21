@@ -477,10 +477,11 @@ mid/msg_type/key，图片按 P0 图片命令下载后 Read，文档链接 `docs 
   下拉标签中 ASCII 逗号显示为中文逗号（alerter 动作列表按逗号切分）、超长
   截断，与「发送/复制/忽略」重名的条目被剔除，`@` 开头的条目也被剔除
   （撞 alerter 哨兵输出 `@CLOSED`/`@TIMEOUT`，会把关闭/超时误判成点选）。
-- `reactions`：通知横幅的表情回应，每行一个飞书 emoji_type（大写下划线，
-  如 THUMBSUP/OK/DONE/APPLAUSE/HEART/THANKS），默认 THUMBSUP（👍），至多
-  取 4 个。点选给对应消息加表情回应，不影响草稿候选（点赞 ≠ 已回复）。
-  横幅动作总数上限 9（首键＋常用语＋表情），超出截断。
+- `reactions`：通知横幅的表情回应，每行一个飞书 emoji_type（多为大写下划线，
+  如 THUMBSUP/OK/DONE/APPLAUSE/HEART/THANKS/JIAYI；也存在 Get/Yes 等混合
+  大小写 key），默认 THUMBSUP（👍），至多取 10 个。点选给对应消息加表情
+  回应，不影响草稿候选（点赞 ≠ 已回复）。
+  横幅动作总数上限 21（首键＋常用语＋表情，常用语与表情各至多 10），超出截断。
 
 ## 状态与排错
 

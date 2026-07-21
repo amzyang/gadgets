@@ -421,6 +421,10 @@ func TestRunReact(t *testing.T) {
 	if err := RunReact(context.Background(), cli, paths, "om_r1", "bad; rm"); err == nil {
 		t.Error("invalid emoji type should be rejected")
 	}
+	// 飞书 emoji_type 存在混合大小写 key（如收到徽章 = Get），须放行
+	if err := RunReact(context.Background(), cli, paths, "om_r1", "Get"); err != nil {
+		t.Errorf("mixed-case emoji type must pass: %v", err)
+	}
 	cli.failReply = true
 	if err := RunReact(context.Background(), cli, paths, "om_r1", "OK"); err == nil {
 		t.Error("react failure should propagate")
