@@ -25,8 +25,11 @@ P0 消息 → 模型起草（1–3 条候选）→ lark-watch send-card（pendin
 
 发卡同时释放的系统通知弹窗也带「发送」按钮：AppleScript 经 do shell script 调
 `lark-watch send-draft --mid <mid>` 直接发候选①（幂等键同为 mid，弹窗/卡片双端
-点击不会双发）。发出后删 pending——其余候选失效，卡片按钮再点显示「已失效」
-（弹窗路径拿不到回调 token，无法改卡完成态，属预期）。
+点击不会双发）。发出后按发卡时回填的卡片 message_id（`pending.card_mid`）PATCH
+改卡「✅ 已发送」（只留所发候选）并删 pending；横幅常用语快捷回复（send-text）
+成功后同样改卡为「已快捷回复」（发出的是常用语而非草稿，候选正文全保留）。
+改卡是 best-effort：card_mid 缺失（存量 pending/发卡响应缺字段）或 PATCH 失败
+仅记日志，发送本身不受影响。
 
 ## 起草命令（模板渲染/转义/pending 全部内置于二进制）
 
@@ -67,8 +70,9 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 - 子进程异常退出自动退避重启（5s→15s→60s）；连续 3 次快速失败发一条
   `{"p":"alert","kind":"card-daemon"}`（仅卡片按钮降级，轮询不受影响）。
 - event_id 去重滚动 1000 条（`handled` 表，防重启后重放）。
-- 改卡 token 30 分钟/最多 2 次、须整卡替换；用尽时改卡失败仅记 stderr
-  （发送本身不受影响）。
+- 改卡 token 30 分钟/最多 2 次、须整卡替换；token 缺失或用尽时按事件自带的
+  卡片 message_id `PATCH /open-apis/im/v1/messages/{id}` 兜底（无 token 限制），
+  兜底也失败才记 stderr 放弃（发送本身不受影响）。
 - 分支语义：send（按 idx 发对应候选；幂等键=mid 防连点双发，选定一条后其余候选
   同键去重、不会二发）/ ignore / copy（逐条回发全部候选，不改卡）/
   pending 缺失改卡「已失效」/ idx 越界（同 mid 重发覆盖 pending 后旧卡点了消失的
@@ -80,6 +84,6 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 |---|---|
 | 点按钮无反应 | `lark-watch status` 看 `consumer_state`；`lark-cli event status`；后台回调配置 |
 | consumer 反复重启 | stderr 里 consume 退出原因；`card.action.trigger` 仅允许一个 consumer，查残留进程 |
-| 改卡失败日志 | token 30min/2 次用尽，属预期；发送本身不受影响 |
-| 卡片显示「草稿已失效」 | pending 已被处理或清理（含已经通知弹窗「发送」发出的情形），回终端确认状态 |
+| 改卡失败日志 | token 用尽会自动走 message_id PATCH 兜底；兜底也失败查 bot 对 `im/v1/messages` PATCH 的权限；发送本身不受影响 |
+| 卡片显示「草稿已失效」 | pending 已被处理或清理，回终端确认状态（通知弹窗「发送」发出的现在会改卡「已发送」，不再走失效） |
 | 单元测试 | `cd {SKILL_DIR}/go && go test ./...`（card_test.go 覆盖回调分支+去重+多候选模板渲染） |

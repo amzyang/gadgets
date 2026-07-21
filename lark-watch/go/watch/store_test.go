@@ -106,6 +106,59 @@ func TestPendingLifecycle(t *testing.T) {
 	}
 }
 
+// card_mid（发卡后回填的卡片自身 message_id）读写往返；未回填读出空串，
+// 无记录 !ok。
+func TestPendingCardMid(t *testing.T) {
+	s := openTestStore(t)
+	s.PendingPut("om_cm", []string{"草稿"}, "text", `{"schema":"2.0"}`, 1)
+
+	card, cardMid, ok := s.PendingCard("om_cm")
+	if !ok || card != `{"schema":"2.0"}` || cardMid != "" {
+		t.Fatalf("before set: card=%q cardMid=%q ok=%v", card, cardMid, ok)
+	}
+	if err := s.PendingSetCardMid("om_cm", "om_card_x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, cardMid, ok = s.PendingCard("om_cm"); !ok || cardMid != "om_card_x" {
+		t.Fatalf("after set: cardMid=%q ok=%v", cardMid, ok)
+	}
+	if _, _, ok := s.PendingCard("om_none"); ok {
+		t.Fatal("missing mid should be !ok")
+	}
+}
+
+// v2 库（有 format/extras、user_version=2）补 card_mid 列升 v3，存量行 card_mid
+// 读出空串（改卡自然跳过）。
+func TestPendingCardMidMigration(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "lark-watch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', extras TEXT NOT NULL DEFAULT '[]', card TEXT NOT NULL, created INTEGER NOT NULL);
+		INSERT INTO pending VALUES('om_old', '旧草稿', 'text', '[]', '{}', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	card, cardMid, ok := s.PendingCard("om_old")
+	if !ok || card != "{}" || cardMid != "" {
+		t.Fatalf("migrated row: card=%q cardMid=%q ok=%v", card, cardMid, ok)
+	}
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
+		t.Fatalf("user_version = %d (err=%v), want %d", v, err, len(migrations))
+	}
+}
+
 // v0 旧库（pending 无 format/extras 列）打开时连跳两级补列并落 user_version，
 // 存量行按 text/单候选读出；二次打开走「版本已最新」快速路径。
 func TestPendingFormatMigration(t *testing.T) {

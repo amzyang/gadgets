@@ -34,6 +34,10 @@ func TestRunSendCardMulti(t *testing.T) {
 	if !cli.hasCall("send-card ou_SELF") {
 		t.Errorf("card not sent: %v", cli.calls)
 	}
+	// 发卡返回的卡片 message_id 落库（alerter 路径改卡完成态的凭证）
+	if _, cardMid, ok := s.PendingCard("om_sc"); !ok || cardMid != "om_card_1" {
+		t.Errorf("card_mid: got %q (ok=%v), want om_card_1", cardMid, ok)
+	}
 }
 
 // waitForFile 轮询等待异步通知脚本落盘（StartNotify / go RunNotify 不阻塞调用方）。
@@ -201,12 +205,15 @@ func stubSendDraftAlert(t *testing.T) *[]string {
 }
 
 // send-draft（弹窗「发送」回调）：按 idx 发送 pending 候选并删除 pending，
-// 语义与卡片「发送」一致（幂等键 = 源消息 mid）。
+// 语义与卡片「发送」一致（幂等键 = 源消息 mid）；成功后按 card_mid 改卡
+// 「已发送」（只留所发候选，按钮剥除）。
 func TestRunSendDraft(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	stubSendDraftAlert(t)
-	s.PendingPut("om_p1", []string{"候选一", "候选二"}, "text", "{}", 1)
+	card := RenderDraftCard("om_p1", "私聊", "张三", "", "原消息", []string{"候选一", "候选二"}, "text", "")
+	s.PendingPut("om_p1", []string{"候选一", "候选二"}, "text", card, 1)
+	s.PendingSetCardMid("om_p1", "om_card_p1")
 
 	if err := RunSendDraft(context.Background(), s, cli, Paths{ConfigDir: t.TempDir()}, "om_p1", 0); err != nil {
 		t.Fatal(err)
@@ -216,6 +223,42 @@ func TestRunSendDraft(t *testing.T) {
 	}
 	if _, _, _, ok := s.PendingGet("om_p1"); ok {
 		t.Error("pending should be deleted after send")
+	}
+	if !cli.hasCall("patch-card om_card_p1") || !cli.hasCall("回复已发送") {
+		t.Errorf("card should be patched to sent: %v", cli.calls)
+	}
+	for _, c := range cli.calls {
+		if strings.HasPrefix(c, "patch-card") &&
+			(strings.Contains(c, "button") || strings.Contains(c, "候选二") || !strings.Contains(c, "候选一")) {
+			t.Errorf("patched card should keep only sent candidate, no buttons: %s", c)
+		}
+	}
+}
+
+// send-draft 改卡是 best-effort：PATCH 失败不影响发送结果；card_mid 未落库
+// （发卡时解析失败/存量 pending）则跳过改卡。
+func TestRunSendDraftPatchBestEffort(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{failPatch: true}
+	stubSendDraftAlert(t)
+	paths := Paths{ConfigDir: t.TempDir()}
+	s.PendingPut("om_p3", []string{"候选"}, "text", testCardContent, 1)
+	s.PendingSetCardMid("om_p3", "om_card_p3")
+
+	if err := RunSendDraft(context.Background(), s, cli, paths, "om_p3", 0); err != nil {
+		t.Fatalf("patch failure must not block send: %v", err)
+	}
+	if _, _, _, ok := s.PendingGet("om_p3"); ok {
+		t.Error("pending should be deleted despite patch failure")
+	}
+
+	cli = &fakeCLI{}
+	s.PendingPut("om_p4", []string{"候选"}, "text", testCardContent, 1)
+	if err := RunSendDraft(context.Background(), s, cli, paths, "om_p4", 0); err != nil {
+		t.Fatal(err)
+	}
+	if cli.hasCall("patch-card") {
+		t.Errorf("no card_mid, should skip patch: %v", cli.calls)
 	}
 }
 
@@ -249,12 +292,15 @@ func TestRunSendDraftErrors(t *testing.T) {
 	}
 }
 
-// send-text（横幅常用语回调）：独立幂等键（≠ mid、随文本互异）、成功删 pending。
+// send-text（横幅常用语回调）：独立幂等键（≠ mid、随文本互异）、成功删 pending；
+// 有卡片时改卡「已快捷回复」（草稿并未发出，不标「已发送」，全部候选正文保留）。
 func TestRunSendText(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	stubSendDraftAlert(t)
-	s.PendingPut("om_q1", []string{"候选"}, "text", "{}", 1)
+	card := RenderDraftCard("om_q1", "私聊", "张三", "", "原消息", []string{"候选"}, "text", "")
+	s.PendingPut("om_q1", []string{"候选"}, "text", card, 1)
+	s.PendingSetCardMid("om_q1", "om_card_q1")
 	paths := Paths{ConfigDir: t.TempDir()}
 
 	if err := RunSendText(context.Background(), s, cli, paths, "om_q1", "收到"); err != nil {
@@ -270,15 +316,34 @@ func TestRunSendText(t *testing.T) {
 	if _, _, _, ok := s.PendingGet("om_q1"); ok {
 		t.Error("pending should be deleted after quick reply")
 	}
+	if !cli.hasCall("patch-card om_card_q1") || !cli.hasCall("已快捷回复") {
+		t.Errorf("card should be patched to quick-replied: %v", cli.calls)
+	}
+	if cli.hasCall("回复已发送") {
+		t.Errorf("quick reply must not claim draft was sent: %v", cli.calls)
+	}
 
-	// 失败：pending 保留、错误上抛、弹提示
-	s.PendingPut("om_q2", []string{"候选"}, "text", "{}", 1)
+	// 无 pending（即时/兜底通知场景）：照发、不改卡
+	cli = &fakeCLI{}
+	if err := RunSendText(context.Background(), s, cli, paths, "om_q3", "收到"); err != nil {
+		t.Fatal(err)
+	}
+	if cli.hasCall("patch-card") {
+		t.Errorf("no pending, should skip patch: %v", cli.calls)
+	}
+
+	// 失败：pending 保留、错误上抛、弹提示、不改卡
+	s.PendingPut("om_q2", []string{"候选"}, "text", testCardContent, 1)
+	s.PendingSetCardMid("om_q2", "om_card_q2")
 	cli.failReply = true
 	if err := RunSendText(context.Background(), s, cli, paths, "om_q2", "收到"); err == nil {
 		t.Error("reply failure should propagate")
 	}
 	if _, _, _, ok := s.PendingGet("om_q2"); !ok {
 		t.Error("pending must be kept after failed quick reply")
+	}
+	if cli.hasCall("patch-card") {
+		t.Errorf("failed reply should not patch card: %v", cli.calls)
 	}
 }
 

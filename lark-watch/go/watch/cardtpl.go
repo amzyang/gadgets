@@ -159,7 +159,10 @@ type doneState struct {
 }
 
 var (
-	doneSent    = doneState{title: "回复已发送", status: "<font color='green'>✅ 已发送</font>"}
+	doneSent = doneState{title: "回复已发送", status: "<font color='green'>✅ 已发送</font>"}
+	// 横幅常用语快捷回复后的完成态：发出的是常用语而非草稿，不标「已发送」
+	// （会误导草稿已发出），候选正文全保留。
+	doneQuick   = doneState{title: "已快捷回复", status: "<font color='green'>✅ 已用常用语回复</font>"}
 	doneIgnored = doneState{title: "草稿已忽略", status: "已忽略"}
 	doneStale   = doneState{title: "草稿已失效", status: "⚠️ 草稿已失效，请回终端处理"}
 	doneFailed  = doneState{title: "回复发送失败", status: "❌ 发送失败，请回终端处理"}

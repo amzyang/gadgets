@@ -161,8 +161,16 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 	if err := s.PendingPut(mid, drafts, format, card, time.Now().Unix()); err != nil {
 		return err
 	}
-	if err := cli.SendCardToUser(self.OpenID, card); err != nil {
+	cardMid, err := cli.SendCardToUser(self.OpenID, card)
+	if err != nil {
 		return fmt.Errorf("send card failed: %w", err)
+	}
+	if cardMid != "" {
+		// 回填卡片自身 message_id：alerter 路径改卡完成态的凭证（回填失败/
+		// 响应缺字段只降级为不改卡，卡片回调路径有 token、不依赖它）。
+		if err := s.PendingSetCardMid(mid, cardMid); err != nil {
+			logf("card_mid save failed for %s: %v", mid, err)
+		}
 	}
 	logf("draft card sent for %s", mid)
 	// 草稿已就绪：认领并展示同会话被延迟的系统通知。查无延迟条目
@@ -193,12 +201,30 @@ const (
 	FlagEmoji    = "emoji"
 )
 
+// markCardDone 把 pending 对应的草稿卡片改为完成态（alerter 路径的改卡：不经
+// 回调、无 token，按发卡时回填的卡片 message_id PATCH）。全程 best-effort——
+// card_mid 未回填（存量 pending/响应缺字段）跳过，渲染或 PATCH 失败仅记日志，
+// 不影响发送主流程。须在 PendingDelete 之前调用（删后读不到卡片原稿）。
+func markCardDone(s *Store, cli LarkCLI, mid string, st doneState, keepIdx int) {
+	card, cardMid, ok := s.PendingCard(mid)
+	if !ok || cardMid == "" {
+		return
+	}
+	newCard, err := RenderDoneCard(card, st, keepIdx)
+	if err != nil {
+		logf("card render failed for %s: %v", mid, err)
+		return
+	}
+	if err := cli.PatchCard(cardMid, newCard); err != nil {
+		logf("card patch failed for %s: %v", mid, err)
+	}
+}
+
 // RunSendDraft 是 send-draft 子命令入口（通知弹窗「发送」按钮的回调）：
 // 按 pending 里的候选直接以用户身份回复，语义与卡片「发送」一致（幂等键 =
-// 源消息 mid，弹窗/卡片双端点击也不会双发）。成功后删除 pending——其余候选
-// 随之失效，此后卡片按钮点击显示「已失效」（弹窗路径拿不到卡片回调 token，
-// 无法改卡完成态）。失败保留 pending 并弹错误提示（弹窗场景无终端可看，
-// 静默失败会让用户误以为已发出；提示弹窗 best-effort）。
+// 源消息 mid，弹窗/卡片双端点击也不会双发）。成功后按 card_mid 改卡
+// 「✅ 已发送」（只留所发候选）并删除 pending。失败保留 pending 并弹错误提示
+// （弹窗场景无终端可看，静默失败会让用户误以为已发出；提示弹窗 best-effort）。
 func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid string, idx int) error {
 	drafts, format, _, ok := s.PendingGet(mid)
 	if !ok {
@@ -213,6 +239,7 @@ func RunSendDraft(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid s
 		sendDraftAlertFn(ctx, paths.ConfigDir, "回复发送失败", "草稿发送失败，请回终端或卡片处理")
 		return err
 	}
+	markCardDone(s, cli, mid, doneSent, idx)
 	s.PendingDelete(mid)
 	evlog.Info("popup.send", "mid", mid, "idx", idx, "ok", true)
 	logf("sent reply for %s (candidate %d, via popup)", mid, idx)
@@ -228,7 +255,8 @@ func quickIdemKey(mid, text string) string {
 }
 
 // RunSendText 是 send-text 子命令入口（通知横幅常用语动作的回调）：
-// 以固定常用语纯文本回复源消息。成功后删除 pending（事已处理，草稿候选
+// 以固定常用语纯文本回复源消息。成功后改卡「已快捷回复」（发出的是常用语而
+// 非草稿，不标「已发送」；候选正文全保留）并删除 pending（事已处理，草稿候选
 // 随之失效，与卡片「发送」语义一致；无 pending——即时/兜底通知场景——是
 // no-op）；失败保留 pending 并弹提示。
 func RunSendText(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid, text string) error {
@@ -237,6 +265,7 @@ func RunSendText(ctx context.Context, s *Store, cli LarkCLI, paths Paths, mid, t
 		sendDraftAlertFn(ctx, paths.ConfigDir, "快捷回复失败", "常用语发送失败，请回终端或飞书处理")
 		return err
 	}
+	markCardDone(s, cli, mid, doneQuick, -1)
 	s.PendingDelete(mid)
 	evlog.Info("popup.qreply", "mid", mid, "ok", true)
 	logf("sent quick reply for %s", mid)

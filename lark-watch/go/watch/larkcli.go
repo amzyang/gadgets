@@ -21,8 +21,9 @@ type LarkCLI interface {
 	ReplyAsUser(mid, draft, format, idemKey string) error
 	ReactAsUser(mid, emojiType string) error
 	SendTextAsBot(userID, text string) error
-	SendCardToUser(userID, cardJSON string) error
+	SendCardToUser(userID, cardJSON string) (cardMid string, err error)
 	UpdateCard(token, cardJSON string) error
+	PatchCard(cardMid, cardJSON string) error
 	EventConsumeCmd(ctx context.Context) *exec.Cmd
 }
 
@@ -218,10 +219,34 @@ func (c *ExecLarkCLI) SendTextAsBot(userID, text string) error {
 	return err
 }
 
-func (c *ExecLarkCLI) SendCardToUser(userID, cardJSON string) error {
-	_, err := c.run("im", "+messages-send", "--user-id", userID, "--as", "bot",
+// SendCardToUser 以 bot 身份发交互卡片，返回卡片自身的 message_id（alerter 路径
+// 改卡完成态的凭证）。响应解析失败返回空串不报错——发卡已成功，缺凭证只是
+// 降级为不改卡。
+func (c *ExecLarkCLI) SendCardToUser(userID, cardJSON string) (string, error) {
+	out, err := c.run("im", "+messages-send", "--user-id", userID, "--as", "bot",
 		"--msg-type", "interactive", "--content", cardJSON)
-	return err
+	if err != nil {
+		return "", err
+	}
+	return parseSentMessageID(out), nil
+}
+
+// parseSentMessageID 从 +messages-send 响应提取 message_id（data 包装优先，
+// 兼容顶层形态；解析不出返回空串）。
+func parseSentMessageID(out []byte) string {
+	var env struct {
+		MessageID string `json:"message_id"`
+		Data      struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(out, &env) != nil {
+		return ""
+	}
+	if env.Data.MessageID != "" {
+		return env.Data.MessageID
+	}
+	return env.MessageID
 }
 
 func (c *ExecLarkCLI) UpdateCard(token, cardJSON string) error {
@@ -230,6 +255,17 @@ func (c *ExecLarkCLI) UpdateCard(token, cardJSON string) error {
 		Card  json.RawMessage `json:"card"`
 	}{Token: token, Card: json.RawMessage(cardJSON)})
 	_, err := c.run("api", "POST", "/open-apis/interactive/v1/card/update", "--as", "bot",
+		"--data", payload)
+	return err
+}
+
+// PatchCard 按卡片消息 id 整卡替换（不依赖回调 token，无 30 分钟/2 次限制；
+// content 是字符串化的卡片 JSON——与 UpdateCard 的 card 对象字段不同）。
+func (c *ExecLarkCLI) PatchCard(cardMid, cardJSON string) error {
+	payload := encodeCompact(struct {
+		Content string `json:"content"`
+	}{Content: cardJSON})
+	_, err := c.run("api", "PATCH", "/open-apis/im/v1/messages/"+cardMid, "--as", "bot",
 		"--data", payload)
 	return err
 }

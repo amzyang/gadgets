@@ -12,8 +12,10 @@ const emptyMessagesResp = `{"ok":true,"data":{"messages":[],"has_more":false}}`
 
 // fakeCLI 记录调用并可注入失败（替代 bash 测试的 PATH shim）。
 type fakeCLI struct {
-	calls     []string
-	failReply bool
+	calls      []string
+	failReply  bool
+	failUpdate bool
+	failPatch  bool
 }
 
 func (f *fakeCLI) record(format string, args ...any) {
@@ -53,12 +55,22 @@ func (f *fakeCLI) SendTextAsBot(userID, text string) error {
 	f.record("send-text %s %s", userID, text)
 	return nil
 }
-func (f *fakeCLI) SendCardToUser(userID, cardJSON string) error {
+func (f *fakeCLI) SendCardToUser(userID, cardJSON string) (string, error) {
 	f.record("send-card %s %s", userID, cardJSON)
-	return nil
+	return "om_card_1", nil
 }
 func (f *fakeCLI) UpdateCard(token, cardJSON string) error {
 	f.record("update-card %s %s", token, cardJSON)
+	if f.failUpdate {
+		return fmt.Errorf("token exhausted")
+	}
+	return nil
+}
+func (f *fakeCLI) PatchCard(cardMid, cardJSON string) error {
+	f.record("patch-card %s %s", cardMid, cardJSON)
+	if f.failPatch {
+		return fmt.Errorf("api error")
+	}
 	return nil
 }
 
@@ -84,6 +96,61 @@ func cardEventIdx(eventID, token, action, mid string, idx int) []byte {
 	return []byte(fmt.Sprintf(
 		`{"event_id":%q,"action_tag":"button","token":%q,"action_value":"{\"action\":\"%s\",\"mid\":\"%s\",\"idx\":%d}"}`,
 		eventID, token, action, mid, idx))
+}
+
+// cardEventMsg 构造带卡片自身 message_id 的回调事件（PATCH 兜底路径）。
+func cardEventMsg(eventID, token, msgID, action, mid string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"event_id":%q,"action_tag":"button","token":%q,"message_id":%q,"action_value":"{\"action\":\"%s\",\"mid\":\"%s\"}"}`,
+		eventID, token, msgID, action, mid))
+}
+
+// token 版改卡失败（30 分钟/2 次用尽）：按事件自带的卡片 message_id PATCH 兜底。
+func TestCardUpdateFallsBackToPatch(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{failUpdate: true}
+	s.PendingPut("om_fb1", []string{"草稿"}, "text", testCardContent, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEventMsg("efb1", "tokfb1", "om_card_fb1", "send", "om_fb1"), 100)
+
+	if !cli.hasCall("update-card tokfb1") {
+		t.Errorf("token update should be tried first: %v", cli.calls)
+	}
+	if !cli.hasCall("patch-card om_card_fb1") || !cli.hasCall("已发送") {
+		t.Errorf("patch fallback missing: %v", cli.calls)
+	}
+}
+
+// token 缺失但事件带 message_id：直接 PATCH，不尝试 token 版。
+func TestCardUpdateNoTokenUsesPatch(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_fb2", []string{"草稿"}, "text", testCardContent, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEventMsg("efb2", "", "om_card_fb2", "ignore", "om_fb2"), 100)
+
+	if cli.hasCall("update-card") {
+		t.Errorf("no token, should not call update-card: %v", cli.calls)
+	}
+	if !cli.hasCall("patch-card om_card_fb2") || !cli.hasCall("已忽略") {
+		t.Errorf("patch fallback missing: %v", cli.calls)
+	}
+}
+
+// token 与 message_id 均缺失：跳过改卡（发送本身不受影响）。
+func TestCardUpdateNoTokenNoMsgIDSkips(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_fb3", []string{"草稿"}, "text", testCardContent, 1)
+
+	HandleCardEvent(s, cli, "ou_SELF", cardEvent("efb3", "", "send", "om_fb3"), 100)
+
+	if cli.hasCall("update-card") || cli.hasCall("patch-card") {
+		t.Errorf("no token/message_id, should skip card update: %v", cli.calls)
+	}
+	if !cli.hasCall("reply om_fb3") {
+		t.Errorf("reply should still happen: %v", cli.calls)
+	}
 }
 
 func TestCardSend(t *testing.T) {

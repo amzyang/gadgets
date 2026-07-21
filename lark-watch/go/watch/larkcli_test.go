@@ -53,6 +53,22 @@ func TestParseAuthStatusUnavailable(t *testing.T) {
 	}
 }
 
+// 发卡响应的 message_id 解析：兼容 data 包装与顶层两种形态；解析不出返回空串
+// （发卡本身已成功，改卡凭证缺失只降级为不改卡，不算失败）。
+func TestParseSentMessageID(t *testing.T) {
+	cases := map[string][2]string{
+		"data 包装": {`{"ok":true,"data":{"message_id":"om_wrap","chat_id":"oc_x"}}`, "om_wrap"},
+		"顶层":      {`{"message_id":"om_top","chat_id":"oc_x"}`, "om_top"},
+		"缺字段":     {`{"ok":true,"data":{}}`, ""},
+		"非 JSON":  {`sent`, ""},
+	}
+	for name, c := range cases {
+		if got := parseSentMessageID([]byte(c[0])); got != c[1] {
+			t.Errorf("%s: want %q, got %q", name, c[1], got)
+		}
+	}
+}
+
 func TestReplyArgs(t *testing.T) {
 	text := strings.Join(replyArgs("om_1", "草稿", "text", "om_1"), " ")
 	if !strings.Contains(text, "--text 草稿") || strings.Contains(text, "--markdown") {

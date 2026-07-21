@@ -11,6 +11,7 @@ type CardEvent struct {
 	EventID     string `json:"event_id"`
 	ActionTag   string `json:"action_tag"`
 	Token       string `json:"token"`
+	MessageID   string `json:"message_id"` // 卡片自身 om_xxx，token 缺失/用尽时 PATCH 兜底
 	CardContent string `json:"card_content"`
 	ActionValue string `json:"action_value"`
 }
@@ -58,8 +59,8 @@ func HandleCardEvent(s *Store, cli LarkCLI, self string, raw []byte, now int64) 
 		if src == "" {
 			src = ev.CardContent
 		}
-		if src == "" || ev.Token == "" {
-			cardLogf("no card source/token, skip update")
+		if src == "" {
+			cardLogf("no card source, skip update")
 			return
 		}
 		newCard, err := RenderDoneCard(src, st, keepIdx)
@@ -67,8 +68,20 @@ func HandleCardEvent(s *Store, cli LarkCLI, self string, raw []byte, now int64) 
 			cardLogf("card source parse failed: %v", err)
 			return
 		}
-		if err := cli.UpdateCard(ev.Token, newCard); err != nil {
-			cardLogf("card update failed (token 可能已用尽，属预期): %v", err)
+		if ev.Token != "" {
+			if cli.UpdateCard(ev.Token, newCard) == nil {
+				return
+			}
+			cardLogf("card update failed (token 可能已用尽), trying patch fallback")
+		}
+		// token 缺失或已用尽（30 分钟/2 次）：按事件自带的卡片 message_id PATCH。
+		// 不查库——doneStale 场景 pending 已缺失，事件字段是唯一可靠来源。
+		if ev.MessageID == "" {
+			cardLogf("no token/message_id, skip update")
+			return
+		}
+		if err := cli.PatchCard(ev.MessageID, newCard); err != nil {
+			cardLogf("card patch fallback failed: %v", err)
 		}
 	}
 

@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS seen (mid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS handled (event_id TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS processed (cid TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fetched (cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', extras TEXT NOT NULL DEFAULT '[]', card TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', extras TEXT NOT NULL DEFAULT '[]', card TEXT NOT NULL, card_mid TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notify_wait (mid TEXT PRIMARY KEY, cid TEXT NOT NULL, msg TEXT NOT NULL, due INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
@@ -78,6 +78,8 @@ var migrations = []struct {
 	// v2: 多候选草稿。draft 保留候选 0 原文（版本偏斜期旧二进制读到的仍是合法
 	// 草稿），extras 存候选 1..n-1 的 JSON 数组。
 	{`ALTER TABLE pending ADD COLUMN extras TEXT NOT NULL DEFAULT '[]'`, "extras"},
+	// v3: 卡片自身 message_id（发卡后回填），alerter 路径改卡完成态的凭证。
+	{`ALTER TABLE pending ADD COLUMN card_mid TEXT NOT NULL DEFAULT ''`, "card_mid"},
 }
 
 // migrate 把落后的库补到最新版本；fresh（本次全新建库）只落版本号不跑迁移。
@@ -385,6 +387,23 @@ func (s *Store) PendingGet(mid string) (drafts []string, format, card string, ok
 	var rest []string
 	json.Unmarshal([]byte(extras), &rest) // DEFAULT '[]' 保证可解码
 	return append([]string{draft}, rest...), format, card, true
+}
+
+// PendingSetCardMid 回填卡片自身的 message_id（发卡成功后才可知，与 PendingPut
+// 分两步——发卡前 pending 必须已入库，保证回调到达时可读）。
+func (s *Store) PendingSetCardMid(mid, cardMid string) error {
+	_, err := s.db.Exec(`UPDATE pending SET card_mid = ? WHERE mid = ?`, cardMid, mid)
+	return err
+}
+
+// PendingCard 读取改卡完成态所需的卡片原稿与卡片 message_id（card_mid 空串 =
+// 未回填，调用方跳过改卡）。
+func (s *Store) PendingCard(mid string) (card, cardMid string, ok bool) {
+	if err := s.db.QueryRow(`SELECT card, card_mid FROM pending WHERE mid = ?`, mid).
+		Scan(&card, &cardMid); err != nil {
+		return "", "", false
+	}
+	return card, cardMid, true
 }
 
 func (s *Store) PendingDelete(mid string) error {
