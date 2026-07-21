@@ -83,10 +83,10 @@ func TestParseChatAvatar(t *testing.T) {
 }
 
 func TestParseUserAvatar(t *testing.T) {
-	// search/v1/user 响应：重名靠 open_id 精确匹配（陈珊 vs 陈珊珊）
+	// search/v1/user 响应：重名靠 open_id 精确匹配（孙七 vs 孙七七）
 	multi := `{"ok":true,"data":{"users":[
-		{"name":"陈珊珊","open_id":"ou_other","avatar":{"avatar_240":"https://cdn/other240.png"}},
-		{"name":"陈珊","open_id":"ou_peer","avatar":{"avatar_240":"https://cdn/peer240.png","avatar_72":"https://cdn/peer72.png"}}]}}`
+		{"name":"孙七七","open_id":"ou_other","avatar":{"avatar_240":"https://cdn/other240.png"}},
+		{"name":"孙七","open_id":"ou_peer","avatar":{"avatar_240":"https://cdn/peer240.png","avatar_72":"https://cdn/peer72.png"}}]}}`
 	cases := map[string][2]string{
 		"open_id 匹配": {multi, "https://cdn/peer240.png"},
 		"无匹配":        {`{"ok":true,"data":{"users":[{"open_id":"ou_other","avatar":{"avatar_240":"https://cdn/o.png"}}]}}`, ""},

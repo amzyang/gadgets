@@ -194,7 +194,7 @@ func TestClassifyReason(t *testing.T) {
 		{"vc", mk(func(m *Message) { m.Type = "video_chat"; m.Text = "" }), true, "vc"},
 		{"p2p", mk(func(m *Message) { m.Ctype = "p2p"; m.Chat = nil }), true, "p2p"},
 		{"at-me-mentions", mk(func(m *Message) { m.AtIDs = []string{"ou_bob", "ou_SELF"} }), true, "at-me"},
-		{"at-me-content", mk(func(m *Message) { m.Text = `<at user_id="ou_SELF">邹洋</at> 看下` }), true, "at-me"},
+		{"at-me-content", mk(func(m *Message) { m.Text = `<at user_id="ou_SELF">周八</at> 看下` }), true, "at-me"},
 		{"watch-user", mk(func(m *Message) { m.Fid = "ou_vip" }), true, "watch-user"},
 		{"watch-chat", mk(func(m *Message) { m.Cid = "oc_vip" }), true, "watch-chat"},
 		{"watch-name", mk(func(m *Message) { m.From = strPtr("王总") }), true, "watch-name"},
@@ -233,7 +233,7 @@ func TestClassifyAtIDs(t *testing.T) {
 	rules := LoadRules("ou_SELF", "", "", "")
 	base := Message{Mid: "om_at", Cid: "oc_group1", Ctype: "group", Chat: strPtr("测试群"),
 		From: strPtr("张三"), Fid: "ou_alice", Ftype: "user", Type: "text",
-		Text: "@邹洋 这个方案你看下", T: "2026-07-17 12:03"}
+		Text: "@周八 这个方案你看下", T: "2026-07-17 12:03"}
 
 	atMe := base
 	atMe.AtIDs = []string{"ou_bob", "ou_SELF"}
@@ -283,6 +283,38 @@ func TestClassifyVC(t *testing.T) {
 func TestBuildDigest(t *testing.T) {
 	msgs := parseNDJSON(t, readTestdata(t, "digest-buf.ndjson"))
 	assertGolden(t, "digest.json", EncodeLine(BuildDigest(msgs)))
+}
+
+func TestNormalizeMedia(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"image-bracket", "[Image: img_v3_0213q_1e9231e8-6665-4c0c-968b-ffd4ea45419g]", "[图片]"},
+		{"image-markdown-inline", "看下这个 ![Image](img_v3_0213q_679c070a) 对吗", "看下这个 [图片] 对吗"},
+		{"file-with-name", `<file key="file_v3_0013q_98b6" name="10726需手动发奖.csv"/>`, "[文件:10726需手动发奖.csv]"},
+		{"file-without-name", `<file key="file_v3_x"/>`, "[文件]"},
+		{"card-with-title", "<card title=\"督察合规讲堂\">\n🖼️ image", "[卡片:督察合规讲堂]"},
+		{"card-without-title", "<card>\n伙伴好！欢迎来到你的专属服务台。", "[卡片]"},
+		{"forwarded", "<forwarded_messages>\n[2026-07-21] 张三: 你好", "[合并转发]"},
+		{"plain-text", "是添来", "是添来"},
+	}
+	for _, tc := range cases {
+		if got := normalizeMedia(tc.in); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestBuildDigestMediaPeek(t *testing.T) {
+	chat := "轻舟平台-唯一沟通群"
+	from := "蔡雨顺"
+	d := BuildDigest([]Message{{
+		Cid: "oc_x", Chat: &chat, From: &from, T: "2026-07-21 14:59",
+		Type: "image", Text: "[Image: img_v3_0213q_679c070a-67cb-4699-830f-0b8b46a2ag]",
+	}})
+	if got, want := d.Chats[0].Peek, "蔡雨顺: [图片]"; got != want {
+		t.Errorf("peek: got %q want %q", got, want)
+	}
 }
 
 func TestShouldFlush(t *testing.T) {

@@ -397,11 +397,11 @@ func TestHandleCardEventLogsAction(t *testing.T) {
 
 func TestRenderDraftCard(t *testing.T) {
 	card := RenderDraftCard("om_x", "私聊", "张三", "12:03",
-		`<at user_id="ou_1">邹洋</at> 帮我看下 *这个* <方案>`, []string{"好的，```稍后```回复"}, "text", "")
+		`<at user_id="ou_1">周八</at> 帮我看下 *这个* <方案>`, []string{"好的，```稍后```回复"}, "text", "")
 
 	for _, want := range []string{
 		`"schema":"2.0"`,
-		"@邹洋 帮我看下 &#42;这个&#42; &#60;方案&#62;", // at 转 @名字 + 特殊字符转义
+		"@周八 帮我看下 &#42;这个&#42; &#60;方案&#62;", // at 转 @名字 + 特殊字符转义
 		"**草稿**\\n\\n```\\n",                 // 代码围栏前空行
 		"'''稍后'''",                           // 草稿内围栏降级
 		`"action":"send","idx":0,"mid":"om_x"`,

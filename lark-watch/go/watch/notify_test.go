@@ -82,7 +82,7 @@ func TestShouldSuppressNotify(t *testing.T) {
 	}{
 		{"飞书标准版前台且活跃", "com.electron.lark", 3, true},
 		{"Lark 国际版前台且活跃", "com.larksuite.larkApp", 3, true},
-		{"KA 定制版（Lingxi）前台且活跃", "com.dancesuite.dance.ka.sagtjy516.mac", 3, true},
+		{"KA 定制版前台且活跃", "com.dancesuite.dance.ka.tenant0000.mac", 3, true},
 		{"飞书前台但人已走开", "com.electron.lark", 300, false},
 		{"其他 app 前台", "net.kovidgoyal.kitty", 3, false},
 		{"frontmost 探测失败", "", 3, false},

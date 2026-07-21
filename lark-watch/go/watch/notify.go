@@ -95,7 +95,7 @@ func ringBell(ctx context.Context) {
 
 // larkBundleMarkers 识别飞书系客户端的 bundle id 子串：
 // electron.lark（飞书标准版）、larksuite（Lark 国际版）、
-// dancesuite（字节 KA 定制版前缀，如高途 Lingxi）。
+// dancesuite（字节 KA 定制版前缀）。
 var larkBundleMarkers = []string{"electron.lark", "larksuite", "dancesuite"}
 
 // suppressIdleMaxSecs：HIDIdleTime 超过该值视为人已离开（锁屏/走开），照常通知。

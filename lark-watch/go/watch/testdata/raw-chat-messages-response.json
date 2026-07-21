@@ -6,7 +6,7 @@
     "messages": [
       {
         "chat_id": "oc_group2",
-        "content": "王五是技术部的\n李四是产品部的\n你先别补 先查查数据没有信息的原因，他俩之前应该都是录入了的 看是删了还是丢了",
+        "content": "王五是技术部的\n李四是产品部的\n名单我下午整理好发你",
         "create_time": "2026-07-17 15:57",
         "deleted": false,
         "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_group2&position=1600",
@@ -50,7 +50,7 @@
       },
       {
         "chat_id": "oc_group2",
-        "content": "王五和李四是哪个部门的呢，我计划给他俩部门信息补充全，方便统计下数据",
+        "content": "王五和李四是哪个部门的？我想把通讯录信息补全",
         "create_time": "2026-07-17 15:51",
         "deleted": false,
         "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_group2&position=1598",

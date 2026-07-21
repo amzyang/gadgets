@@ -118,7 +118,7 @@ func TestTickIncremental(t *testing.T) {
 		chats: []ChatMeta{{Cid: "oc_a", Name: "群A", Mode: "group"}},
 		msgs: map[string]string{"oc_a": chatMsgsResp(false,
 			rawMsgJSON("om_1", "ou_alice", "张三", "早", "2026-07-17 12:00"),
-			rawMsgJSON("om_2", "ou_alice", "张三", "@邹洋 看下", "2026-07-17 12:01", "ou_SELF"),
+			rawMsgJSON("om_2", "ou_alice", "张三", "@周八 看下", "2026-07-17 12:01", "ou_SELF"),
 		)},
 	}
 	p, events := newTestPoller(t, f, 2000)
