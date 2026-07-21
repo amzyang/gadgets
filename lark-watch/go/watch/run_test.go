@@ -29,7 +29,7 @@ func cancelReturnsWithin(t *testing.T, shellCmd string, limit time.Duration) {
 		return exec.CommandContext(ctx, "sh", "-c", shellCmd)
 	}}
 	done := make(chan struct{})
-	go func() { runConsumerOnce(ctx, s, cli, "ou_SELF"); close(done) }()
+	go func() { runConsumerOnce(ctx, s, cli, &CardHandler{Store: s, CLI: cli, Self: "ou_SELF"}); close(done) }()
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 	select {

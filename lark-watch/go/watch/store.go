@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS handled (event_id TEXT PRIMARY KEY, ts INTEGER NOT NU
 CREATE TABLE IF NOT EXISTS processed (cid TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fetched (cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', extras TEXT NOT NULL DEFAULT '[]', card TEXT NOT NULL, card_mid TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS book_pending (mid TEXT PRIMARY KEY, slots TEXT NOT NULL, title TEXT NOT NULL, participants TEXT NOT NULL, card TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notify_wait (mid TEXT PRIMARY KEY, cid TEXT NOT NULL, msg TEXT NOT NULL, due INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
@@ -434,6 +435,60 @@ func (s *Store) PendingDelete(mid string) error {
 func (s *Store) PendingCount() int {
 	var n int
 	s.db.QueryRow(`SELECT COUNT(*) FROM pending`).Scan(&n)
+	return n
+}
+
+// ---------- book_pending（预约意向卡：候选时段与预订参数）----------
+
+// BookPending 是预约意向卡落盘的预订参数（点「预约」后卡片回调据此执行 room book）。
+type BookPending struct {
+	Slots        []BookSlot
+	Title        string
+	Participants []string
+	Card         string // 卡片原稿（改卡完成态用）
+}
+
+func (s *Store) BookPendingPut(mid string, bp BookPending, now int64) error {
+	slots, _ := json.Marshal(bp.Slots)
+	parts, _ := json.Marshal(bp.Participants)
+	_, err := s.db.Exec(
+		`INSERT INTO book_pending(mid, slots, title, participants, card, created) VALUES(?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(mid) DO UPDATE SET slots = excluded.slots, title = excluded.title, participants = excluded.participants, card = excluded.card, created = excluded.created`,
+		mid, string(slots), bp.Title, string(parts), bp.Card, now)
+	return err
+}
+
+func scanBookPending(row *sql.Row) (BookPending, bool) {
+	var bp BookPending
+	var slots, parts string
+	if err := row.Scan(&slots, &bp.Title, &parts, &bp.Card); err != nil {
+		return BookPending{}, false
+	}
+	json.Unmarshal([]byte(slots), &bp.Slots)
+	json.Unmarshal([]byte(parts), &bp.Participants)
+	return bp, true
+}
+
+func (s *Store) BookPendingGet(mid string) (BookPending, bool) {
+	return scanBookPending(s.db.QueryRow(
+		`SELECT slots, title, participants, card FROM book_pending WHERE mid = ?`, mid))
+}
+
+// BookPendingClaim 原子取出并删除（DELETE RETURNING）：room book 无幂等键，
+// 双订防护只能落在这里——连点/重复事件的第二次 claim 落空。
+func (s *Store) BookPendingClaim(mid string) (BookPending, bool) {
+	return scanBookPending(s.db.QueryRow(
+		`DELETE FROM book_pending WHERE mid = ? RETURNING slots, title, participants, card`, mid))
+}
+
+func (s *Store) BookPendingDelete(mid string) error {
+	_, err := s.db.Exec(`DELETE FROM book_pending WHERE mid = ?`, mid)
+	return err
+}
+
+func (s *Store) BookPendingCount() int {
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM book_pending`).Scan(&n)
 	return n
 }
 

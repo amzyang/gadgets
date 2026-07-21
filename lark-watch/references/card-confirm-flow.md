@@ -78,6 +78,34 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
   pending 缺失改卡「已失效」/ idx 越界（同 mid 重发覆盖 pending 后旧卡点了消失的
   候选）改卡「已失效」、pending 保留 / reply 失败保留 pending 改卡「发送失败」。
 
+## 预约意向卡（send-book-card：点「预约」直接 room book）
+
+与草稿卡同一条回调链路，独立 pending（SQLite `book_pending` 表，键同为源消息
+mid——草稿卡与意向卡可对同一条消息并存、互不覆盖）。发卡命令与触发时机见
+SKILL.md「预约意向卡」一节。
+
+```
+P0 会议意图消息 → 模型定时段/参会人 → lark-watch send-book-card（book_pending 入库 + bot 发卡）
+  ├─ 点「预约 ①/②/③」→ 二进制：BookPendingClaim（原子取出并删除；room book 无幂等键，
+  │  双订防护只能靠 claim——连点/重复事件第二次落空）→ exec room book -d -t --title -p --json
+  │    ├─ 成功：改卡「✅ 已预约 <会议室>·<时段>」（只留所选时段块）+ stdout {"p":"booked",...}
+  │    └─ 失败：改卡「❌ 预约失败：<message（hint）>」+ stdout {"p":"book-failed",...}；
+  │       pending 不 re-put（按钮已随改卡移除），重试 = 模型按事件重发新卡
+  └─ 点「忽略」→ 二进制：删 book_pending → 改卡「已忽略」
+```
+
+- 预订同步执行在 consumer 循环上（人手点击稀疏；不进 goroutine，关停时不会
+  丢下进行到一半的预订）；单次预订超时 60s。已知取舍：room 挂死时其他卡片
+  点击与 SIGTERM 关停最坏被拖 60s（二次 SIGTERM 无效），宁可等预订收尾也
+  不留「订没订上」的不定态；等不及 SIGKILL 的话预订可能已生效，`room list
+  --json` 核对。
+- room CLI 从 PATH 找（`LW_ROOM_BIN` 可覆盖），固定 argv exec、绝不过 shell——
+  参数来自本地 SQLite，不受消息内容注入。
+- 成功信封解析失败（exit 0 但输出异常）按失败处理并提示「预订可能已生效，
+  room list 核对」——绝不误报成功；真已订上时重订会被 conflict 挡住，不致双订。
+- 改卡完成态与草稿卡共用 RenderDoneCard：token 版优先，缺失/用尽走事件
+  message_id 的 PATCH 兜底。
+
 ## 排错
 
 | 现象 | 排查 |
@@ -86,4 +114,8 @@ printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
 | consumer 反复重启 | stderr 里 consume 退出原因；`card.action.trigger` 仅允许一个 consumer，查残留进程 |
 | 改卡失败日志 | token 用尽会自动走 message_id PATCH 兜底；兜底也失败查 bot 对 `im/v1/messages` PATCH 的权限；发送本身不受影响 |
 | 卡片显示「草稿已失效」 | pending 已被处理或清理，回终端确认状态（通知弹窗「发送」发出的现在会改卡「已发送」，不再走失效） |
-| 单元测试 | `cd {SKILL_DIR}/go && go test ./...`（card_test.go 覆盖回调分支+去重+多候选模板渲染） |
+| 点「预约」后改「预约失败」 | `grep card.book ~/.local/state/lark-watch/events.log \| jq .` 看 reason；auth/config 类按 `/room` skill 修（room login / booking.room_list） |
+| 「预约」显示「已失效」 | book_pending 已被消费（双击第二下 / 同 mid 重发覆盖旧卡），以 `booked` 事件或 `room list --json` 为准 |
+| 点「预约」后卡片无任何反应 | daemon 可能在预订中被 SIGKILL/崩溃带走（正常 SIGTERM 会等预订收尾）：`room list --json` 核对是否已订上，已订则手动告知对方，未订让模型重发意向卡 |
+| 点按钮完全没动静（改卡也没有） | 点击者不是本人（卡片禁转发，但历史卡片无此限制）：events.log 里 grep `operator .* is not self` |
+| 单元测试 | `cd {SKILL_DIR}/go && go test ./...`（card_test.go 覆盖回调分支+去重+多候选模板渲染+预约分支） |

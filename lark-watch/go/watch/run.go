@@ -92,6 +92,7 @@ func RunDaemon(ctx context.Context, s *Store, cli LarkCLI, paths Paths, interval
 func superviseCardConsumer(ctx context.Context, s *Store, cli LarkCLI, self string, out func(line []byte)) {
 	defer s.MetaSet("consumer_state", "stopped")
 
+	h := &CardHandler{Store: s, CLI: cli, Booker: &ExecRoomBooker{}, Self: self, Out: out}
 	fastFails := 0
 	alerted := false
 	backoffs := []time.Duration{5 * time.Second, 15 * time.Second, 60 * time.Second}
@@ -101,7 +102,7 @@ func superviseCardConsumer(ctx context.Context, s *Store, cli LarkCLI, self stri
 			return
 		}
 		start := time.Now()
-		err := runConsumerOnce(ctx, s, cli, self)
+		err := runConsumerOnce(ctx, s, cli, h)
 		if ctx.Err() != nil {
 			cardLogf("consumer stopped")
 			return
@@ -143,7 +144,7 @@ var (
 
 // runConsumerOnce 跑一轮 consume 子进程直到其退出。
 // stdin 由父进程持有写端保活（无界 consume 在 stdin EOF 时会优雅退出）。
-func runConsumerOnce(ctx context.Context, s *Store, cli LarkCLI, self string) error {
+func runConsumerOnce(ctx context.Context, s *Store, cli LarkCLI, h *CardHandler) error {
 	cmd := cli.EventConsumeCmd(ctx)
 	// npm bin shim 会再 spawn 真正的 node 进程：信号只发直接子进程会漏掉它，
 	// 孤儿继续握着 stdout 写端把 Scan 钉死、cmd.Wait 永不可达（2026-07-21
@@ -198,7 +199,7 @@ func runConsumerOnce(ctx context.Context, s *Store, cli LarkCLI, self string) er
 		if len(line) == 0 {
 			continue
 		}
-		HandleCardEvent(s, cli, self, line, time.Now().Unix())
+		h.Handle(line, time.Now().Unix())
 	}
 	return cmd.Wait()
 }

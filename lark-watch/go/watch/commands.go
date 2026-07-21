@@ -191,6 +191,56 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 	return nil
 }
 
+// maxBookSlots 是预约意向卡的候选时段上限（对齐草稿候选 1–3 条的交互约束）。
+const maxBookSlots = 3
+
+// slotRe 校验 --slot 值：'MM-DD HH:MM-HH:MM'（日期与时段以单个空格分隔，
+// 语义校验——时间是否已过、节假日——留给 room book 在点击时报错）。
+var slotRe = regexp.MustCompile(`^(\d{2}-\d{2}) (\d{2}:\d{2}-\d{2}:\d{2})$`)
+
+// ParseBookSlots 解析 send-book-card 的 --slot 值列表（1–maxBookSlots 条）。
+// 格式错误在发卡时立即报错——不能等用户点击才发现参数拼错。
+func ParseBookSlots(vals []string) ([]BookSlot, error) {
+	if len(vals) == 0 || len(vals) > maxBookSlots {
+		return nil, fmt.Errorf("need 1-%d --slot values, got %d", maxBookSlots, len(vals))
+	}
+	slots := make([]BookSlot, len(vals))
+	for i, v := range vals {
+		m := slotRe.FindStringSubmatch(v)
+		if m == nil {
+			return nil, fmt.Errorf("invalid --slot %q (want 'MM-DD HH:MM-HH:MM')", v)
+		}
+		slots[i] = BookSlot{Date: m[1], Time: m[2]}
+	}
+	return slots, nil
+}
+
+// RunSendBookCard 预约意向卡：预订参数 book_pending 入库 + 渲染 + bot 私发给
+// 用户本人。点「预约」后由卡片回调直接执行 room book（零模型参与），故所有
+// 参数在此刻固化；不接 notify 延迟认领（草稿卡的 send-card 已负责通知联动）。
+func RunSendBookCard(s *Store, cli LarkCLI, mid string, slots []BookSlot, title string, participants []string, original, from, scene, t string) error {
+	// room 拒绝飞书 open_id：必败参数在发卡时报错，不能等用户点击才发现。
+	for _, p := range participants {
+		if strings.HasPrefix(p, "ou_") {
+			return fmt.Errorf("participant %q: room 不接受 open_id（ou_）——用 lark-contact +search-user 反查 enterprise_email，群聊用 oc_ 群 ID", p)
+		}
+	}
+	self, err := cli.AuthSelf()
+	if err != nil {
+		return err
+	}
+	card := RenderBookCard(mid, scene, from, t, original, slots, title, participants)
+	bp := BookPending{Slots: slots, Title: title, Participants: participants, Card: card}
+	if err := s.BookPendingPut(mid, bp, time.Now().Unix()); err != nil {
+		return err
+	}
+	if _, err := cli.SendCardToUser(self.OpenID, card); err != nil {
+		return fmt.Errorf("send book card failed: %w", err)
+	}
+	logf("book card sent for %s (%d slot(s))", mid, len(slots))
+	return nil
+}
+
 // 通知横幅/弹窗回调的子命令与 flag 名：main dispatch 与 notify.go 脚本模板
 // 共用（脚本里字面拼命令行，编译期无约束，常量即两侧契约）。
 const (
@@ -305,7 +355,7 @@ func buildStatus(s *Store, cli LarkCLI, paths Paths, now time.Time) Status {
 	}
 	st := Status{
 		Cursor: cursor, Heartbeat: heartbeat, HeartbeatAge: now.Unix() - heartbeat,
-		ConsumerState: consumer, Pending: s.PendingCount(),
+		ConsumerState: consumer, Pending: s.PendingCount(), PendingBook: s.BookPendingCount(),
 		DigestBuffered: s.DigestCount(), LastFlush: lastFlush,
 	}
 	st.RestrictedChats, _ = s.RestrictedList()

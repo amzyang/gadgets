@@ -593,3 +593,58 @@ func TestAvatarCache(t *testing.T) {
 		t.Fatalf("negative cache: %q %d %v, want empty 3000 true", url, at, ok)
 	}
 }
+
+func TestBookPendingCRUD(t *testing.T) {
+	s := openTestStore(t)
+	bp := BookPending{
+		Slots:        []BookSlot{{Date: "07-22", Time: "14:00-15:00"}, {Date: "07-22", Time: "16:00-17:00"}},
+		Title:        "方案对齐会",
+		Participants: []string{"alice@corp.com", "oc_x"},
+		Card:         `{"schema":"2.0"}`,
+	}
+	if err := s.BookPendingPut("om_b1", bp, 100); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := s.BookPendingGet("om_b1")
+	if !ok {
+		t.Fatal("want ok after put")
+	}
+	if len(got.Slots) != 2 || got.Slots[1] != (BookSlot{Date: "07-22", Time: "16:00-17:00"}) ||
+		got.Title != "方案对齐会" || len(got.Participants) != 2 || got.Card != `{"schema":"2.0"}` {
+		t.Fatalf("roundtrip mismatch: %+v", got)
+	}
+	// 同 mid 重发覆盖
+	if err := s.BookPendingPut("om_b1", BookPending{Slots: bp.Slots[:1], Title: "改期会", Card: "c2"}, 200); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.BookPendingGet("om_b1")
+	if len(got.Slots) != 1 || got.Title != "改期会" || len(got.Participants) != 0 {
+		t.Fatalf("overwrite mismatch: %+v", got)
+	}
+	if s.BookPendingCount() != 1 {
+		t.Fatalf("count: want 1, got %d", s.BookPendingCount())
+	}
+	if err := s.BookPendingDelete("om_b1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.BookPendingGet("om_b1"); ok || s.BookPendingCount() != 0 {
+		t.Error("delete should remove the row")
+	}
+}
+
+// Claim 原子取出并删除：第二次 claim 落空（双击/重复事件不双订）。
+func TestBookPendingClaim(t *testing.T) {
+	s := openTestStore(t)
+	s.BookPendingPut("om_c1", BookPending{Slots: []BookSlot{{Date: "07-23", Time: "10:00-11:00"}}, Title: "评审"}, 100)
+
+	bp, ok := s.BookPendingClaim("om_c1")
+	if !ok || bp.Title != "评审" || len(bp.Slots) != 1 {
+		t.Fatalf("first claim: ok=%v %+v", ok, bp)
+	}
+	if _, ok := s.BookPendingClaim("om_c1"); ok {
+		t.Error("second claim should miss")
+	}
+	if _, ok := s.BookPendingClaim("om_none"); ok {
+		t.Error("claim of unknown mid should miss")
+	}
+}

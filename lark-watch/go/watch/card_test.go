@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -122,13 +123,20 @@ func cardEventMsg(eventID, token, msgID, action, mid string) []byte {
 		eventID, token, msgID, action, mid))
 }
 
+// cardEventOp 构造带点击者 open_id 的回调事件（operator 过滤路径）。
+func cardEventOp(eventID, operator, action, mid string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"event_id":%q,"action_tag":"button","token":"tok","operator_id":%q,"action_value":"{\"action\":\"%s\",\"mid\":\"%s\"}"}`,
+		eventID, operator, action, mid))
+}
+
 // token 版改卡失败（30 分钟/2 次用尽）：按事件自带的卡片 message_id PATCH 兜底。
 func TestCardUpdateFallsBackToPatch(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{failUpdate: true}
 	s.PendingPut("om_fb1", []string{"草稿"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEventMsg("efb1", "tokfb1", "om_card_fb1", "send", "om_fb1"), 100)
+	handleCard(s, cli, "ou_SELF", cardEventMsg("efb1", "tokfb1", "om_card_fb1", "send", "om_fb1"), 100)
 
 	if !cli.hasCall("update-card tokfb1") {
 		t.Errorf("token update should be tried first: %v", cli.calls)
@@ -144,7 +152,7 @@ func TestCardUpdateNoTokenUsesPatch(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_fb2", []string{"草稿"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEventMsg("efb2", "", "om_card_fb2", "ignore", "om_fb2"), 100)
+	handleCard(s, cli, "ou_SELF", cardEventMsg("efb2", "", "om_card_fb2", "ignore", "om_fb2"), 100)
 
 	if cli.hasCall("update-card") {
 		t.Errorf("no token, should not call update-card: %v", cli.calls)
@@ -160,7 +168,7 @@ func TestCardUpdateNoTokenNoMsgIDSkips(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_fb3", []string{"草稿"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("efb3", "", "send", "om_fb3"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("efb3", "", "send", "om_fb3"), 100)
 
 	if cli.hasCall("update-card") || cli.hasCall("patch-card") {
 		t.Errorf("no token/message_id, should skip card update: %v", cli.calls)
@@ -175,7 +183,7 @@ func TestCardSend(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_t1", []string{"测试草稿"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e1", "tok1", "send", "om_t1"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e1", "tok1", "send", "om_t1"), 100)
 
 	if !cli.hasCall("reply om_t1 测试草稿 format=text") {
 		t.Errorf("reply args wrong: %v", cli.calls)
@@ -194,7 +202,7 @@ func TestCardSend(t *testing.T) {
 	}
 	// 去重：同一 event_id 重放不产生新调用
 	n := len(cli.calls)
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e1", "tok1", "send", "om_t1"), 101)
+	handleCard(s, cli, "ou_SELF", cardEvent("e1", "tok1", "send", "om_t1"), 101)
 	if len(cli.calls) != n {
 		t.Errorf("duplicate event produced calls: %v", cli.calls[n:])
 	}
@@ -206,7 +214,7 @@ func TestCardSendUsesLocalCardSource(t *testing.T) {
 	local := `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"LOCAL_CARD_MARKER"},{"tag":"button"}]}}`
 	s.PendingPut("om_t6", []string{"草稿6"}, "text", local, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e6", "tok6", "send", "om_t6"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e6", "tok6", "send", "om_t6"), 100)
 
 	if !cli.hasCall("LOCAL_CARD_MARKER") {
 		t.Errorf("update should use local card source: %v", cli.calls)
@@ -219,7 +227,7 @@ func TestCardSendMarkdownFormat(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_t7", []string{"```go\nx\n```"}, "markdown", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e7", "tok7", "send", "om_t7"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e7", "tok7", "send", "om_t7"), 100)
 
 	if !cli.hasCall("format=markdown") {
 		t.Errorf("format not passed through: %v", cli.calls)
@@ -233,7 +241,7 @@ func TestCardSendCandidate(t *testing.T) {
 	card := RenderDraftCard("om_c", "私聊", "张三", "", "原消息", []string{"候选A", "候选B"}, "text", "")
 	s.PendingPut("om_c", []string{"候选A", "候选B"}, "text", card, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEventIdx("e10", "tok10", "send", "om_c", 1), 100)
+	handleCard(s, cli, "ou_SELF", cardEventIdx("e10", "tok10", "send", "om_c", 1), 100)
 
 	if !cli.hasCall("reply om_c 候选B format=text") {
 		t.Errorf("should reply candidate B: %v", cli.calls)
@@ -255,7 +263,7 @@ func TestCardSendIdxOutOfRange(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_o", []string{"唯一候选"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEventIdx("e11", "tok11", "send", "om_o", 5), 100)
+	handleCard(s, cli, "ou_SELF", cardEventIdx("e11", "tok11", "send", "om_o", 5), 100)
 
 	if cli.hasCall("reply") {
 		t.Errorf("should not reply out-of-range candidate: %v", cli.calls)
@@ -274,7 +282,7 @@ func TestCardCopyMulti(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_cm", []string{"候选甲", "候选乙"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e12", "tok12", "copy", "om_cm"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e12", "tok12", "copy", "om_cm"), 100)
 
 	if !cli.hasCall("send-text ou_SELF 候选甲") || !cli.hasCall("send-text ou_SELF 候选乙") {
 		t.Errorf("copy should send every candidate: %v", cli.calls)
@@ -292,7 +300,7 @@ func TestCardIgnore(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_t2", []string{"草稿2"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e2", "tok2", "ignore", "om_t2"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e2", "tok2", "ignore", "om_t2"), 100)
 
 	if _, _, _, ok := s.PendingGet("om_t2"); ok {
 		t.Error("pending should be deleted")
@@ -307,7 +315,7 @@ func TestCardCopy(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_t3", []string{"草稿3"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e3", "tok3", "copy", "om_t3"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e3", "tok3", "copy", "om_t3"), 100)
 
 	if !cli.hasCall("send-text ou_SELF 草稿3") {
 		t.Errorf("copy should send draft text: %v", cli.calls)
@@ -324,7 +332,7 @@ func TestCardSendMissingPending(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e4", "tok4", "send", "om_none"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e4", "tok4", "send", "om_none"), 100)
 
 	if cli.hasCall("reply") {
 		t.Errorf("should not reply: %v", cli.calls)
@@ -339,7 +347,7 @@ func TestCardSendFailureKeepsPending(t *testing.T) {
 	cli := &fakeCLI{failReply: true}
 	s.PendingPut("om_t5", []string{"草稿5"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEvent("e5", "tok5", "send", "om_t5"), 100)
+	handleCard(s, cli, "ou_SELF", cardEvent("e5", "tok5", "send", "om_t5"), 100)
 
 	if _, _, _, ok := s.PendingGet("om_t5"); !ok {
 		t.Error("pending should be kept on failure")
@@ -356,7 +364,7 @@ func TestHandleCardEventLogsAction(t *testing.T) {
 	cli := &fakeCLI{}
 	s.PendingPut("om_log", []string{"候选A", "候选B"}, "text", testCardContent, 1)
 
-	HandleCardEvent(s, cli, "ou_SELF", cardEventIdx("e20", "tok20", "send", "om_log", 1), 100)
+	handleCard(s, cli, "ou_SELF", cardEventIdx("e20", "tok20", "send", "om_log", 1), 100)
 
 	recs := findLogs(logs(), "card.action")
 	if len(recs) != 1 {
@@ -603,5 +611,303 @@ func TestRenderDoneCardUpdatesTitle(t *testing.T) {
 	}
 	if !strings.Contains(got, doneSent.title) {
 		t.Errorf("done card missing title %q: %s", doneSent.title, got)
+	}
+}
+
+// handleCard 以默认 CardHandler（无 booker/out）处理回调，覆盖草稿卡分支。
+func handleCard(s *Store, cli LarkCLI, self string, raw []byte, now int64) { //nolint:unparam // self 与调用点语义对齐
+	(&CardHandler{Store: s, CLI: cli, Self: self}).Handle(raw, now)
+}
+
+// fakeBooker 记录预订调用并可注入失败（RoomBooker 测试替身）。
+type fakeBooker struct {
+	calls []string
+	fail  error
+	res   BookResult
+}
+
+func (f *fakeBooker) Book(_ context.Context, slot BookSlot, title string, participants []string) (BookResult, error) {
+	f.calls = append(f.calls, fmt.Sprintf("book %s %s %s %s", slot.Date, slot.Time, title, strings.Join(participants, ",")))
+	if f.fail != nil {
+		return BookResult{}, f.fail
+	}
+	return f.res, nil
+}
+
+// bookHandler 构造带 booker 与事件收集的 CardHandler。
+func bookHandler(s *Store, cli LarkCLI, b RoomBooker) (*CardHandler, *[][]byte) {
+	var lines [][]byte
+	h := &CardHandler{Store: s, CLI: cli, Booker: b, Self: "ou_SELF",
+		Out: func(line []byte) { lines = append(lines, line) }}
+	return h, &lines
+}
+
+func testBookPending() BookPending {
+	return BookPending{
+		Slots:        []BookSlot{{Date: "07-22", Time: "14:00-15:00"}, {Date: "07-22", Time: "16:00-17:00"}},
+		Title:        "方案对齐会",
+		Participants: []string{"alice@corp.com"},
+		Card:         testCardContent,
+	}
+}
+
+// 点「预约 ②」：按 idx 预订对应时段，pending 删除，改卡「会议已预约」，
+// stdout 发 booked 事件（模型据此起草告知对方）。
+func TestCardBookSuccess(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	booker := &fakeBooker{res: BookResult{Room: "A栋3F-301", Date: "2026-07-22", Start: "16:00", End: "17:00", EventID: "ev_1"}}
+	h, lines := bookHandler(s, cli, booker)
+	s.BookPendingPut("om_bk1", testBookPending(), 1)
+
+	h.Handle(cardEventIdx("eb1", "tokb1", "book", "om_bk1", 1), 100)
+
+	if len(booker.calls) != 1 || booker.calls[0] != "book 07-22 16:00-17:00 方案对齐会 alice@corp.com" {
+		t.Errorf("booker calls: %v", booker.calls)
+	}
+	if _, ok := s.BookPendingGet("om_bk1"); ok {
+		t.Error("book pending should be deleted after booking")
+	}
+	if !cli.hasCall("update-card tokb1") || !cli.hasCall("✅ 已预约 A栋3F-301 · 2026-07-22 16:00-17:00") {
+		t.Errorf("done card missing booked status: %v", cli.calls)
+	}
+	if len(*lines) != 1 {
+		t.Fatalf("want 1 stdout event, got %v", *lines)
+	}
+	var evt BookedEvent
+	if err := json.Unmarshal((*lines)[0], &evt); err != nil {
+		t.Fatal(err)
+	}
+	if evt.P != "booked" || evt.Room != "A栋3F-301" || evt.Mid != "om_bk1" || evt.EventID != "ev_1" || evt.Title != "方案对齐会" {
+		t.Errorf("booked event: %+v", evt)
+	}
+	// 去重：同一 event_id 重放不再预订
+	h.Handle(cardEventIdx("eb1", "tokb1", "book", "om_bk1", 1), 101)
+	if len(booker.calls) != 1 {
+		t.Errorf("duplicate event should not book again: %v", booker.calls)
+	}
+}
+
+// 预订失败：pending 不 re-put（重试由模型经 book-failed 事件重发新卡），
+// 改卡「预约失败」带错误信息，stdout 发 book-failed。
+func TestCardBookFailure(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	booker := &fakeBooker{fail: &BookError{Type: "no_room", Message: "该时段无可用会议室", Hint: "换时段重试"}}
+	h, lines := bookHandler(s, cli, booker)
+	s.BookPendingPut("om_bk2", testBookPending(), 1)
+
+	h.Handle(cardEventIdx("eb2", "tokb2", "book", "om_bk2", 0), 100)
+
+	if _, ok := s.BookPendingGet("om_bk2"); ok {
+		t.Error("book pending should not be re-put on failure")
+	}
+	if !cli.hasCall("预约失败") || !cli.hasCall("该时段无可用会议室") {
+		t.Errorf("done card missing failure status: %v", cli.calls)
+	}
+	var evt BookFailedEvent
+	if len(*lines) != 1 {
+		t.Fatalf("want 1 stdout event, got %v", *lines)
+	}
+	if err := json.Unmarshal((*lines)[0], &evt); err != nil {
+		t.Fatal(err)
+	}
+	if evt.P != "book-failed" || evt.Reason != "no_room" || evt.Mid != "om_bk2" || evt.Hint != "换时段重试" {
+		t.Errorf("book-failed event: %+v", evt)
+	}
+}
+
+// 双击（两个不同 event_id）：第一次订完删 pending，第二次落空改卡「已失效」，
+// 只订一次。
+func TestCardBookDoubleClick(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	booker := &fakeBooker{res: BookResult{Room: "R1"}}
+	h, _ := bookHandler(s, cli, booker)
+	s.BookPendingPut("om_bk3", testBookPending(), 1)
+
+	h.Handle(cardEventIdx("eb3a", "tok3a", "book", "om_bk3", 0), 100)
+	// 第二击：pending 已删，改卡走事件 card_content 兜底（真实回调都带）
+	h.Handle([]byte(`{"event_id":"eb3b","action_tag":"button","token":"tok3b",`+
+		`"action_value":"{\"action\":\"book\",\"mid\":\"om_bk3\",\"idx\":0}",`+
+		`"card_content":"{\"schema\":\"2.0\",\"body\":{\"elements\":[]}}"}`), 101)
+
+	if len(booker.calls) != 1 {
+		t.Errorf("double click should book once: %v", booker.calls)
+	}
+	if !cli.hasCall("已失效") {
+		t.Errorf("second click should mark stale: %v", cli.calls)
+	}
+}
+
+// pending 缺失 / idx 越界：不预订，改卡「已失效」。
+func TestCardBookMissingAndOutOfRange(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	booker := &fakeBooker{}
+	h, lines := bookHandler(s, cli, booker)
+
+	h.Handle(cardEventIdx("eb4", "tok4", "book", "om_none", 0), 100)
+
+	s.BookPendingPut("om_bk4", testBookPending(), 1)
+	h.Handle(cardEventIdx("eb5", "tok5", "book", "om_bk4", 9), 101)
+
+	if len(booker.calls) != 0 {
+		t.Errorf("should not book: %v", booker.calls)
+	}
+	if _, ok := s.BookPendingGet("om_bk4"); !ok {
+		t.Error("out-of-range click should keep pending")
+	}
+	if !cli.hasCall("已失效") || len(*lines) != 0 {
+		t.Errorf("want stale card and no events: %v %v", cli.calls, *lines)
+	}
+}
+
+// 「忽略」：删 pending，改卡「已忽略」，不预订不发事件。
+func TestCardBookIgnore(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	booker := &fakeBooker{}
+	h, lines := bookHandler(s, cli, booker)
+	s.BookPendingPut("om_bk5", testBookPending(), 1)
+
+	h.Handle(cardEvent("eb6", "tok6", "book-ignore", "om_bk5"), 100)
+
+	if _, ok := s.BookPendingGet("om_bk5"); ok {
+		t.Error("pending should be deleted on ignore")
+	}
+	if !cli.hasCall("已忽略") || len(booker.calls) != 0 || len(*lines) != 0 {
+		t.Errorf("ignore should only update card: %v %v", cli.calls, booker.calls)
+	}
+}
+
+// 意向卡渲染：多时段圈号按钮 + 忽略；orange 头部；标题/参会展示行；
+// element_id 沿用 draft- 前缀（复用完成态 keepIdx 过滤）；原消息转义。
+func TestRenderBookCard(t *testing.T) {
+	card := RenderBookCard("om_rb", "私聊", "张三", "12:03", "明天下午对齐 *方案*",
+		[]BookSlot{{Date: "07-22", Time: "14:00-15:00"}, {Date: "07-22", Time: "16:00-17:00"}},
+		"方案对齐会", []string{"张三", "本人"})
+
+	var last int
+	for _, marker := range []string{
+		"明天下午对齐 &#42;方案&#42;",
+		"时段 ①", `"action":"book","idx":0,"mid":"om_rb"`,
+		"时段 ②", `"action":"book","idx":1,"mid":"om_rb"`,
+		"标题：方案对齐会", `"action":"book-ignore","mid":"om_rb"`,
+	} {
+		i := strings.Index(card, marker)
+		if i < 0 {
+			t.Fatalf("card missing %q\n%s", marker, card)
+		}
+		if i < last {
+			t.Fatalf("element %q out of order\n%s", marker, card)
+		}
+		last = i
+	}
+	for _, want := range []string{
+		"会议预约待确认", `"template":"orange"`, "预约 ①", "预约 ②",
+		`"element_id":"draft-0"`, `"element_id":"draft-1"`,
+		"参会：张三、本人", "07-22 14:00-15:00", "07-22 16:00-17:00",
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+}
+
+// 卡片被转发后他人点击：operator ≠ self 直接丢弃（不发送、不预订、pending
+// 保留、不发事件）；operator == self 或缺失（旧事件兼容）照常处理。
+func TestCardOperatorFilter(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	booker := &fakeBooker{}
+	h, lines := bookHandler(s, cli, booker)
+	s.PendingPut("om_op1", []string{"草稿"}, "text", testCardContent, 1)
+	s.BookPendingPut("om_op1", testBookPending(), 1)
+
+	h.Handle(cardEventOp("eop1", "ou_OTHER", "send", "om_op1"), 100)
+	h.Handle(cardEventOp("eop2", "ou_OTHER", "book", "om_op1"), 101)
+
+	if len(cli.calls) != 0 || len(booker.calls) != 0 || len(*lines) != 0 {
+		t.Errorf("foreign operator should be dropped: %v %v %v", cli.calls, booker.calls, *lines)
+	}
+	if _, _, _, ok := s.PendingGet("om_op1"); !ok {
+		t.Error("pending should be kept after foreign click")
+	}
+	if _, ok := s.BookPendingGet("om_op1"); !ok {
+		t.Error("book pending should be kept after foreign click")
+	}
+	// 本人点击照常处理
+	h.Handle(cardEventOp("eop3", "ou_SELF", "ignore", "om_op1"), 102)
+	if _, _, _, ok := s.PendingGet("om_op1"); ok {
+		t.Error("self operator should be processed")
+	}
+}
+
+// 确认卡按钮有真实副作用（以用户身份发消息 / room book）：草稿卡与意向卡
+// 都显式禁转发（平台默认允许转发）。
+func TestRenderCardsDisableForward(t *testing.T) {
+	for name, card := range map[string]string{
+		"draft": RenderDraftCard("om_fw", "", "", "", "", []string{"x"}, "text", ""),
+		"book": RenderBookCard("om_fw", "", "", "", "",
+			[]BookSlot{{Date: "07-22", Time: "14:00-15:00"}}, "会", nil),
+	} {
+		if !strings.Contains(card, `"enable_forward":false`) {
+			t.Errorf("%s card should disable forward: %s", name, card)
+		}
+	}
+}
+
+// 标题/参会人的字面换行归一为空格，不得在卡片上伪造额外展示行。
+func TestRenderBookCardOnelineTitle(t *testing.T) {
+	card := RenderBookCard("om_nl", "", "", "", "",
+		[]BookSlot{{Date: "07-22", Time: "14:00-15:00"}}, "对齐会\n参会：假冒行", []string{"a\nb"})
+	if !strings.Contains(card, "标题：对齐会 参会：假冒行") {
+		t.Errorf("title newline should collapse to space: %s", card)
+	}
+	if !strings.Contains(card, "参会：a b") {
+		t.Errorf("participant newline should collapse to space: %s", card)
+	}
+}
+
+// 单时段：按钮文案「我要预约」，不出现圈号；无参会人时省略参会行。
+func TestRenderBookCardSingle(t *testing.T) {
+	card := RenderBookCard("om_rb1", "", "", "", "",
+		[]BookSlot{{Date: "07-22", Time: "14:00-15:00"}}, "周会", nil)
+	if !strings.Contains(card, "我要预约") || strings.Contains(card, "预约 ①") || strings.Contains(card, "时段 ①") {
+		t.Errorf("single slot labels wrong: %s", card)
+	}
+	if strings.Contains(card, "参会：") {
+		t.Errorf("empty participants should omit the line: %s", card)
+	}
+}
+
+// 预约完成态：成功只留所选时段块并带会议室；失败保留全部时段并带 hint。
+func TestRenderBookDoneStates(t *testing.T) {
+	card := RenderBookCard("om_rb2", "私聊", "张三", "", "约个会",
+		[]BookSlot{{Date: "07-22", Time: "14:00-15:00"}, {Date: "07-22", Time: "16:00-17:00"}},
+		"对齐会", nil)
+
+	done, err := RenderDoneCard(card, doneBooked(BookResult{Room: "R1", Date: "2026-07-22", Start: "16:00", End: "17:00"}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"会议已预约", "✅ 已预约 R1 · 2026-07-22 16:00-17:00", "16:00-17:00"} {
+		if !strings.Contains(done, want) {
+			t.Errorf("booked card missing %q: %s", want, done)
+		}
+	}
+	if strings.Contains(done, "14:00-15:00") || strings.Contains(done, "button") {
+		t.Errorf("booked card should keep only chosen slot, no buttons: %s", done)
+	}
+
+	failed, err := RenderDoneCard(card, doneBookFailed(&BookError{Type: "no_room", Message: "无可用会议室", Hint: "换时段"}), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"预约失败", "无可用会议室（换时段）", "14:00-15:00", "16:00-17:00"} {
+		if !strings.Contains(failed, want) {
+			t.Errorf("failed card missing %q: %s", want, failed)
+		}
 	}
 }

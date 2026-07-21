@@ -394,3 +394,59 @@ func TestRunSendCardEmptyDraft(t *testing.T) {
 		t.Errorf("card should not be sent: %v", cli.calls)
 	}
 }
+
+func TestParseBookSlots(t *testing.T) {
+	slots, err := ParseBookSlots([]string{"07-22 14:00-15:00", "07-23 09:30-10:00"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slots[0] != (BookSlot{Date: "07-22", Time: "14:00-15:00"}) || slots[1].Date != "07-23" {
+		t.Errorf("parsed: %+v", slots)
+	}
+	for name, vals := range map[string][]string{
+		"空列表":  {},
+		"超过3条": {"07-22 14:00-15:00", "07-22 14:00-15:00", "07-22 14:00-15:00", "07-22 14:00-15:00"},
+		"缺时段":  {"07-22"},
+		"日期格式": {"7-22 14:00-15:00"},
+		"多余空格": {"07-22  14:00-15:00"},
+	} {
+		if _, err := ParseBookSlots(vals); err == nil {
+			t.Errorf("%s: want error for %v", name, vals)
+		}
+	}
+}
+
+// room 拒绝飞书 open_id（ou_）：必败参数在发卡入口立即报错，不入库不发卡。
+func TestRunSendBookCardRejectsOpenID(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	err := RunSendBookCard(s, cli, "om_ou", []BookSlot{{Date: "07-22", Time: "14:00-15:00"}},
+		"会", []string{"alice@corp.com", "ou_abc"}, "", "", "", "")
+	if err == nil || !strings.Contains(err.Error(), "ou_abc") {
+		t.Fatalf("want ou_ rejection, got %v", err)
+	}
+	if _, ok := s.BookPendingGet("om_ou"); ok || len(cli.calls) != 0 {
+		t.Errorf("nothing should be persisted or sent: %v", cli.calls)
+	}
+}
+
+// 发卡即固化预订参数入库；卡片经 bot 私发给本人。
+func TestRunSendBookCard(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	slots := []BookSlot{{Date: "07-22", Time: "14:00-15:00"}}
+
+	if err := RunSendBookCard(s, cli, "om_sb1", slots, "对齐会", []string{"alice@corp.com"}, "约个会", "张三", "私聊", "12:03"); err != nil {
+		t.Fatal(err)
+	}
+	bp, ok := s.BookPendingGet("om_sb1")
+	if !ok || bp.Title != "对齐会" || len(bp.Slots) != 1 || bp.Participants[0] != "alice@corp.com" {
+		t.Fatalf("book pending: ok=%v %+v", ok, bp)
+	}
+	if bp.Card == "" || !strings.Contains(bp.Card, "会议预约待确认") {
+		t.Errorf("card source should be persisted: %q", bp.Card)
+	}
+	if !cli.hasCall("send-card ou_SELF") || !cli.hasCall("我要预约") {
+		t.Errorf("card not sent to self: %v", cli.calls)
+	}
+}

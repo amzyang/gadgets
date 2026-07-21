@@ -114,7 +114,9 @@ stdout 每行一个 JSON 事件，`p` 字段区分类型。**判断权在模型*
    拿不到或模型无法消费（语音/视频/表情包/无权限/防泄密）时，转述与草稿
    显式声明「未能查看 X」，发卡可加 `--note` 同步声明；草稿不得写
    「看过了」，需要内容时请对方发文字版。
-3. **分类**：咨询 / 闲聊 / 任务 / FYI。
+3. **分类**：咨询 / 闲聊 / 任务 / FYI。对方在约会议/约时间（"找个时间对齐"
+   "明天过下方案"）而会话尚未敲定日程的，除正常草稿外另走「预约意向卡」
+   （见下节，与草稿卡并行、互不替代）。
 4. **草稿**：起草前先注入个人画像（lark-persona 产物；文件存在才用，缺失静默跳过）：
    读 `~/.local/share/lark-persona/persona/contacts/<fid>.md`（对此人的称呼与语气分寸）
    和 `~/.local/share/lark-persona/persona/style.md` 中对应受众层（上级/平级/下属/群）
@@ -216,6 +218,38 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
 的一切由二进制直接执行，零模型参与。细节与排错见
 `{SKILL_DIR}/references/card-confirm-flow.md`。
 
+### 预约意向卡（会议/日程意图 → 一键订会议室）
+
+细判发现对方在约会议/约时间、而会话尚未敲定日程（无已约定的明确时间、无日程
+卡片）时，除正常草稿卡外再发一张预约意向卡：用户在飞书点「预约」，回调链路
+直接执行 `room book` 真实预订会议室（零模型参与），结果以 `booked`/
+`book-failed` 事件回到 stdout（见下）。日程已敲定、对方只是转发会议信息、或
+`replied` 场景不发。
+
+1. **定时段**（1–3 个候选）：消息里已有明确时间直接用；模糊表达（"明天下午"）
+   进 `/lark-calendar` 用 `+freebusy`/`+suggestion` 查空闲后落成具体时间块；
+   完全没提时间（"改天聊聊"）不发卡，草稿里先问时间。
+2. **前置自检**（本地/只读，不过关就不发卡、按 `/room` skill 引导修复）：
+   `room whoami --json` exit 3 → 引导 `room login`；`room config get
+   booking.room_list --json` 为空 → 引导配置会议室列表。
+3. **参会人**：p2p 用 lark-contact `+search-user` 反查对方 `enterprise_email`
+   （room 拒绝 `ou_` 开头的 open_id）；群聊仅在明显是全组会议时用 `-p <cid>`
+   （`oc_` 直接支持），否则只加发起人；room login 后本人自动加入，无需 `-p` 本人。
+4. **发卡**：
+
+   ```
+   {SKILL_DIR}/bin/lark-watch send-book-card --mid <mid> \
+     --slot '07-22 14:00-15:00' --slot '07-22 16:00-17:00' \
+     --title '<会议标题>' -p <enterprise_email|oc_xxx> \
+     --original '<原消息文本>' --from '<发送者>' --scene '<私聊|群名>' --t '<消息时间>'
+   ```
+
+   `--slot` 格式 `MM-DD HH:MM-HH:MM`，可重复至多 3 条（点哪个订哪个）；
+   `--title` 必填。预订参数在发卡时固化、点击后模型不再参与——时段与参会人
+   发卡前就要算对；同 mid 重发即覆盖旧卡参数。卡片按钮「我要预约」（多时段
+   「预约 ①/②/③」）＋「忽略」。细节与排错见
+   `{SKILL_DIR}/references/card-confirm-flow.md`「预约意向卡」一节。
+
 ### digest（群聊摘要，每 10 分钟或攒满 20 条）
 
 字段：`n` 总条数，`chats[]` 按热度排序（`chat` 群名、`n` 条数、`peek` 最新一条
@@ -226,6 +260,18 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
 
 `{"p":"backlog","offline_secs":N}`：游标落后超 15 分钟已自动夹紧到当下（不会把
 历史洪泛成实时 P0）。转告用户离线时长，建议说「补课」拉积压；不自动执行。
+
+### booked / book-failed（预约意向卡结果）
+
+- `{"p":"booked",...}`：用户点了「预约」且 room book 成功，含 `title/room/date/
+  start/end`、`mid`（源消息，回复锚点）与 `event_id`（日历日程，room cancel 用）。
+  转述预订结果，并起草一句告知对方（时间＋会议室，如「订好了，明天 14 点
+  A栋3F-301」）经 `send-card --mid <mid>` 确认后发出；对方已被加为参会人时
+  还会收到日程邀请，这句只是对话闭环，别写成正式通知。
+- `{"p":"book-failed",...}`：预订失败，卡片已改「预约失败」、无需安抚操作。
+  按 `reason` 处置：`no_room`/`conflict` → 换时段（可再查 `+freebusy`）重发
+  意向卡；`auth`/`config` → 按 `hint` 引导用户修 room CLI（`/room` skill）；
+  其余转述 `msg` 即可。失败不自动重试，重发新卡即重试。
 
 ### alert / Monitor 退出
 
@@ -266,6 +312,8 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
 
 - **不代发**：任何回复必须经用户确认（终端确认、卡片点击，或通知横幅上
   点「发送/常用语/表情」——横幅点选即用户显式确认）。展示草稿 ≠ 授权发送。
+  预约会议室同理：`room book` 是真实预订，只经意向卡「预约」点击触发，
+  模型不得自行执行——除非用户在终端明确让订。
 - **禁止主动断开**：Monitor 只有用户明确要求才停
   （TaskStop + `ScheduleWakeup stop:true`）。
 - **实时链路不重放历史**：首启 baseline 从当下开始，停机重启自动夹紧游标。
@@ -404,13 +452,14 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
 ## 状态与排错
 
 - 状态库：`~/.local/state/lark-watch/lark-watch.db`（SQLite，`sqlite3` 可直接查；
-  表：meta/seen/handled/processed/fetched/pending/notify_wait/digest_buf/
-  catchup_last/restricted/chat_state）。同目录 `*.imported` 是 bash 时代的
-  留档，可忽略。
+  表：meta/seen/handled/processed/fetched/pending/book_pending/notify_wait/
+  digest_buf/catchup_last/restricted/chat_state/avatar）。同目录 `*.imported`
+  是 bash 时代的留档，可忽略。
 - 事件诊断日志：`~/.local/state/lark-watch/events.log`（NDJSON，默认开启，路径
   见 `status` 输出的 `event_log` 字段）。每条消息的判定（`msg.keep`/`msg.drop`
   的 `reason`：p2p/at-me/keyword:…/ignore:…/self 等）、tick 摘要、stdout 事件
-  （`emit`）、通知链路（`notify.defer/flush/claim/replied/skip`）、卡片动作
+  （`emit`）、通知链路（`notify.defer/flush/claim/replied/skip`）、预约执行
+  （`card.book`）、卡片动作
   （`card.action`）、横幅动作回调（`popup.send/qreply/react`）与全部 stderr
   诊断文本都在里面。排查「这条消息为什么推了/
   没推」按 mid grep：`grep om_xxx events.log | jq .`。超 10MB 轮转为

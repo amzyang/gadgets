@@ -41,6 +41,7 @@ func usage() {
   mark        标记会话已处理游标
   ignore-add  追加噪音正则
   send-card   起草确认卡片（pending 入库 + 渲染 + bot 私发）
+  send-book-card 预约意向卡片（点「预约」由卡片回调直接 room book）
   send-draft  发送 pending 候选草稿（通知弹窗「发送」按钮的回调）
   send-text   以常用语快捷回复源消息（通知横幅动作的回调）
   react       给源消息加表情回应（通知横幅动作的回调）
@@ -145,6 +146,33 @@ func dispatch(cmd string, args []string) error {
 		}
 		defer s.Close()
 		return watch.RunSendCard(s, cli, watch.DefaultPaths(), *mid, drafts, *original, *from, *scene, *t, *format, *note)
+
+	case "send-book-card":
+		fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+		mid := fs.String("mid", "", "原消息 message_id")
+		var slots multiFlag
+		fs.Var(&slots, "slot", "候选时段 'MM-DD HH:MM-HH:MM'（可重复，至多 3 条）")
+		title := fs.String("title", "", "会议标题")
+		var participants multiFlag
+		fs.Var(&participants, "p", "参会人：邮箱前缀/完整邮箱/oc_ 群 ID（可重复；room 拒绝 ou_）")
+		original := fs.String("original", "", "原消息文本")
+		from := fs.String("from", "", "发送者名")
+		scene := fs.String("scene", "", "私聊或群名")
+		t := fs.String("t", "", "消息时间")
+		fs.Parse(args)
+		if *mid == "" || *title == "" || len(slots) == 0 {
+			return fmt.Errorf("usage: lark-watch send-book-card --mid <mid> --slot 'MM-DD HH:MM-HH:MM' [--slot ...] --title <标题> [-p <参会人>]... [--original <text>] [--from <name>] [--scene <私聊|群名>] [--t <time>]")
+		}
+		parsed, err := watch.ParseBookSlots(slots)
+		if err != nil {
+			return err
+		}
+		s, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return watch.RunSendBookCard(s, cli, *mid, parsed, *title, participants, *original, *from, *scene, *t)
 
 	case watch.CmdSendDraft:
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)

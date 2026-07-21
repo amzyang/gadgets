@@ -33,8 +33,9 @@ type cardElement struct {
 type draftCard struct {
 	Schema string `json:"schema"`
 	Config struct {
-		UpdateMulti bool   `json:"update_multi"`
-		WidthMode   string `json:"width_mode"`
+		UpdateMulti   bool   `json:"update_multi"`
+		WidthMode     string `json:"width_mode"`
+		EnableForward bool   `json:"enable_forward"` // 平台默认 true，须显式 false
 	} `json:"config"`
 	Header struct {
 		Title    cardText `json:"title"`
@@ -60,6 +61,14 @@ func escapeCardMarkdown(s string) string {
 		"[", "&#91;", "]", "&#93;", "~", "&#126;", "`", "&#96;",
 	)
 	return r.Replace(s)
+}
+
+// oneline 把换行归一为空格：标题/参会人本应单行，字面换行会在卡片上伪造
+// 额外展示行（escapeCardMarkdown 不动换行——原消息引用块是合法多行）。
+func oneline(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	}), " ")
 }
 
 func button(label, typ string, value map[string]any) cardElement {
@@ -90,18 +99,16 @@ func padCardFences(s string) string {
 	return strings.Join(out, "\n")
 }
 
-// RenderDraftCard 渲染草稿确认卡片 JSON（模板实例化从模型侧下沉到二进制）。
-// 仅 mid/drafts 必给；scene/from/t/original 为展示字段，空值对应片段整体省略。
-// format=="markdown" 时草稿按 markdown 渲染（预览≈对方所见），否则包围栏展示源文。
-// drafts 为候选列表（len >= 1）：单条时布局与文案同单草稿；多条时每条标注圈号
-// （①②③…，SKILL.md 约束 1–3 条，圈号字符到 ⑳ 为止）并各带自己的发送按钮。
-// note 非空时在全部候选之后、共享按钮之前追加灰字「依据」状态行（表态门禁）。
-func RenderDraftCard(mid, scene, from, t, original string, drafts []string, format, note string) string {
+// newCardShell 构造卡片骨架（config/header/body 布局与原消息引用块，草稿卡与
+// 预约意向卡共用）。scene/from/t/original 为展示字段，空值对应片段整体省略。
+func newCardShell(title, template, scene, from, t, original string) draftCard {
 	var c draftCard
 	c.Schema = "2.0"
 	c.Config.UpdateMulti = true
 	c.Config.WidthMode = "default"
-	c.Header.Title = cardText{Tag: "plain_text", Content: "回复草稿待确认"}
+	// 按钮触发真实副作用（发消息/订会议室），转发出去等于把触发权交给别人。
+	c.Config.EnableForward = false
+	c.Header.Title = cardText{Tag: "plain_text", Content: title}
 	var sub []string
 	for _, s := range []string{scene, from, t} {
 		if s != "" {
@@ -109,7 +116,7 @@ func RenderDraftCard(mid, scene, from, t, original string, drafts []string, form
 		}
 	}
 	c.Header.Subtitle = cardText{Tag: "plain_text", Content: strings.Join(sub, " · ")}
-	c.Header.Template = "blue"
+	c.Header.Template = template
 
 	c.Body.Direction = "vertical"
 	c.Body.Padding = "12px 12px 16px 12px"
@@ -121,6 +128,17 @@ func RenderDraftCard(mid, scene, from, t, original string, drafts []string, form
 		}
 		c.Body.Elements = append(c.Body.Elements, cardElement{Tag: "markdown", Content: quoted})
 	}
+	return c
+}
+
+// RenderDraftCard 渲染草稿确认卡片 JSON（模板实例化从模型侧下沉到二进制）。
+// 仅 mid/drafts 必给；scene/from/t/original 为展示字段，空值对应片段整体省略。
+// format=="markdown" 时草稿按 markdown 渲染（预览≈对方所见），否则包围栏展示源文。
+// drafts 为候选列表（len >= 1）：单条时布局与文案同单草稿；多条时每条标注圈号
+// （①②③…，SKILL.md 约束 1–3 条，圈号字符到 ⑳ 为止）并各带自己的发送按钮。
+// note 非空时在全部候选之后、共享按钮之前追加灰字「依据」状态行（表态门禁）。
+func RenderDraftCard(mid, scene, from, t, original string, drafts []string, format, note string) string {
+	c := newCardShell("回复草稿待确认", "blue", scene, from, t, original)
 	single := len(drafts) == 1
 	for i, draft := range drafts {
 		head, label := "**草稿**", "发送"
@@ -151,6 +169,37 @@ func RenderDraftCard(mid, scene, from, t, original string, drafts []string, form
 	return encodeCompact(c)
 }
 
+// RenderBookCard 渲染预约意向卡片 JSON（会议/日程意图 → 一键订会议室）。
+// slots 为候选时段（1–3 条，CLI 入口校验）：单条按钮「我要预约」，多条各带
+// 「预约 ①②③」（callback 带 idx，点哪个订哪个）。participants 仅作展示，
+// 预订参数以 book_pending 落盘为准。
+func RenderBookCard(mid, scene, from, t, original string, slots []BookSlot, title string, participants []string) string {
+	c := newCardShell("会议预约待确认", "orange", scene, from, t, original)
+	single := len(slots) == 1
+	for i, slot := range slots {
+		head, label := "📅", "我要预约"
+		if !single {
+			head = fmt.Sprintf("📅 时段 %c", '①'+i)
+			label = fmt.Sprintf("预约 %c", '①'+i)
+		}
+		c.Body.Elements = append(c.Body.Elements,
+			// element_id 沿用 draft- 前缀：复用 RenderDoneCard 的 keepIdx 过滤
+			cardElement{Tag: "markdown", ElementID: fmt.Sprintf("draft-%d", i),
+				Content: fmt.Sprintf("%s **%s %s**", head, slot.Date, slot.Time)},
+			button(label, "primary_filled", map[string]any{"action": "book", "mid": mid, "idx": i}),
+		)
+	}
+	info := "标题：" + escapeCardMarkdown(oneline(title))
+	if len(participants) > 0 {
+		info += "\n参会：" + escapeCardMarkdown(oneline(strings.Join(participants, "、")))
+	}
+	c.Body.Elements = append(c.Body.Elements,
+		cardElement{Tag: "markdown", Content: info},
+		button("忽略", "default", map[string]any{"action": "book-ignore", "mid": mid}),
+	)
+	return encodeCompact(c)
+}
+
 // doneState 是卡片完成态：title 覆盖头部标题（脱离「待确认」），
 // status 是追加到卡片末尾的状态行 markdown（与卡片其余 markup 同层维护）。
 type doneState struct {
@@ -167,6 +216,22 @@ var (
 	doneStale   = doneState{title: "草稿已失效", status: "⚠️ 草稿已失效，请回终端处理"}
 	doneFailed  = doneState{title: "回复发送失败", status: "❌ 发送失败，请回终端处理"}
 )
+
+// doneBooked 是预约成功完成态（状态行含实际选中的会议室与时段）。
+func doneBooked(res BookResult) doneState {
+	return doneState{title: "会议已预约", status: fmt.Sprintf(
+		"<font color='green'>✅ 已预约 %s · %s %s-%s</font>",
+		escapeCardMarkdown(res.Room), res.Date, res.Start, res.End)}
+}
+
+// doneBookFailed 是预约失败完成态（状态行带 room 错误信封的 message/hint）。
+func doneBookFailed(be *BookError) doneState {
+	msg := be.Message
+	if be.Hint != "" {
+		msg += "（" + be.Hint + "）"
+	}
+	return doneState{title: "预约失败", status: "❌ 预约失败：" + escapeCardMarkdown(msg)}
+}
 
 // RenderDoneCard 基于卡片原稿生成完成态：更新头部标题、去掉全部按钮、末尾追加状态行。
 // keepIdx >= 0 时只保留 element_id 为 draft-<keepIdx> 的候选块（发送成功后卡片

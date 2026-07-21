@@ -128,6 +128,31 @@ type Backlog struct {
 	OfflineSecs int64  `json:"offline_secs"`
 }
 
+// BookedEvent 是预约意向卡「预约」成功后的 stdout 事件（p:"booked"）：模型据此
+// 起草一句告知对方（经 send-card 确认卡片发送，不代发）。Mid 为源消息 id
+// （回复锚点），EventID 为日历日程 id（room cancel 用）。
+type BookedEvent struct {
+	P       string `json:"p"`
+	Title   string `json:"title"`
+	Room    string `json:"room"`
+	Date    string `json:"date"`
+	Start   string `json:"start"`
+	End     string `json:"end"`
+	Mid     string `json:"mid"`
+	EventID string `json:"event_id"`
+}
+
+// BookFailedEvent 是预约失败事件（p:"book-failed"）：模型按 Reason 处置
+// （no_room/conflict 换时段重发意向卡，auth/config 引导 /room 修复，其余转述）。
+type BookFailedEvent struct {
+	P      string `json:"p"`
+	Title  string `json:"title"`
+	Reason string `json:"reason"`
+	Msg    string `json:"msg"`
+	Hint   string `json:"hint,omitempty"`
+	Mid    string `json:"mid"`
+}
+
 // RestrictedChat 是开启防泄密模式而被跳过监控的群（API 无法读取，status 可见）。
 type RestrictedChat struct {
 	Cid   string `json:"cid"`
@@ -142,6 +167,7 @@ type Status struct {
 	HeartbeatAge         int64            `json:"heartbeat_age_secs"`
 	ConsumerState        string           `json:"consumer_state"`
 	Pending              int              `json:"pending"`
+	PendingBook          int              `json:"pending_book"`
 	DigestBuffered       int              `json:"digest_buffered"`
 	LastFlush            int64            `json:"last_flush"`
 	RestrictedChats      []RestrictedChat `json:"restricted_chats,omitempty"`
