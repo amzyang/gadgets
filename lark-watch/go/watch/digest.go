@@ -41,7 +41,6 @@ func BuildDigest(msgs []Message) Digest {
 			Cid:  cid,
 			N:    g.n,
 			Peek: truncateRunes(from+": "+g.latest.Text, 60),
-			Link: chatOpenLink(cid),
 		})
 	}
 	sort.Slice(chats, func(i, j int) bool {

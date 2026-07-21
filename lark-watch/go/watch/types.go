@@ -75,7 +75,6 @@ type DigestChat struct {
 	Cid  string `json:"cid"`
 	N    int    `json:"n"`
 	Peek string `json:"peek"`
-	Link string `json:"link"`
 }
 
 type Digest struct {
