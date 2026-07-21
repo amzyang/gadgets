@@ -23,8 +23,8 @@ P0 消息 → 模型起草（1–3 条候选）→ lark-watch send-card（pendin
 模型只负责起草 + 调 send-card；点击后完全旁路。
 ```
 
-发卡同时释放的系统通知弹窗也带「发送」按钮：AppleScript 经 do shell script 调
-`lark-watch send-draft --mid <mid>` 直接发候选①（幂等键同为 mid，弹窗/卡片双端
+发卡同时释放的 alerter 通知横幅也带「发送」动作：回调
+`lark-watch send-draft --mid <mid>` 直接发候选①（幂等键同为 mid，横幅/卡片双端
 点击不会双发）。发出后按发卡时回填的卡片 message_id（`pending.card_mid`）PATCH
 改卡「✅ 已发送」（只留所发候选）并删 pending；横幅常用语快捷回复（send-text）
 成功后同样改卡为「已快捷回复」（发出的是常用语而非草稿，候选正文全保留）。

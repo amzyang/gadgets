@@ -9,7 +9,8 @@
 
 - macOS + [Claude Code](https://claude.com/claude-code)
 - Node.js ≥ 18（`brew install node`）
-- Go（`brew install go`，编译监控二进制用）
+- Go + golangci-lint（`brew install go golangci-lint`，编译监控二进制用）
+- alerter（`brew install vjeantet/tap/alerter`，内置通知横幅依赖；未装时 P0 只响铃不弹横幅）
 - 飞书官方 CLI：`npm i -g @larksuite/cli`
 
 ## 安装
@@ -64,8 +65,8 @@ Claude 会启动后台监控并常驻：P0 消息（私聊/@你/会议/重点人
 | `watchlist` | 重点人/重点群，命中升 P0（每行一个 `ou_`/`oc_` 或名称）|
 | `keywords` | 正文关键词正则，命中升 P0 |
 | `ignore` | 噪音正则，命中直接丢弃 |
-| `notify` | P0 通知配置（可选；缺省内置弹窗，`off` 关闭，写脚本自定义），详见 SKILL.md |
-| `notify-vc` | 音视频会议专用弹窗命令（可选；缺省内置「忽略/加入」弹窗）|
+| `notify` | P0 通知配置（可选；缺省走 alerter 通知中心横幅，`off` 关闭，写脚本自定义），详见 SKILL.md |
+| `notify-vc` | 音视频会议专用通知命令（可选；缺省走 alerter 带「加入」按钮的横幅）|
 
 状态存 `~/.local/state/lark-watch/lark-watch.db`（SQLite，只落本机）。
 

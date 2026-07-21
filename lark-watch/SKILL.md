@@ -506,5 +506,6 @@ mid/msg_type/key，图片按 P0 图片命令下载后 Read，文档链接 `docs 
   这些群开启了防泄密模式、监控无法覆盖（见「alert / Monitor 退出」的
   `kind:"restricted"`）。
 - 重置监控：TaskStop Monitor 后删 lark-watch.db 再重启（会重新 baseline）。
-- 重建二进制：`cd {SKILL_DIR}/go && make install`（vet + test + build）。
+- 重建二进制：`cd {SKILL_DIR}/go && make install`（lint + vet + test + build，
+  依赖 golangci-lint）。
 - 单元测试：`cd {SKILL_DIR}/go && go test ./...`。
