@@ -58,6 +58,13 @@ stdout 每行一个 JSON 事件，`p` 字段区分类型。**判断权在模型*
 （排除自己/机器人/噪音，p2p、@我 与音视频会议升 P0），值不值得回复、
 是否打扰用户由你细判。
 
+**超长事件分片（`p:"chunk"`）**：单行过长的事件会被拆成连续多行
+`{"p":"chunk","seq":i,"of":k,"data":"<原 JSON 片段>"}`。收到 chunk 行时，把
+`seq` 1 到 `k` 的全部 `data` 按序**原样字符串拼接**（不修剪、不解转义），得到
+完整的单行事件 JSON，再按其 `p` 字段走对应处理流程。同一事件的分片必然相邻、
+不与其他事件交错；若一批只见部分分片（罕见），等下一批凑齐再处理，禁止对
+残缺片段强行解析或直接转述 `data` 原文。
+
 ### P0（私聊 / 群里 @我 / 音视频会议 / watchlist / 关键词命中）
 
 字段（按输出键序，正文靠前、ID 收尾）：`text`(正文，截 500 字) `from`(发送者)
@@ -264,7 +271,8 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
 ### digest（群聊摘要，每 10 分钟或攒满 20 条）
 
 字段：`n` 总条数，`chats[]` 按热度排序（`chat` 群名、`n` 条数、`peek` 最新一条
-预览、`link` 直达会话——markdown 链接，一行一会话）。一两句转述即可；
+预览）。会话链接自拼：`lark://applink.feishu.cn/client/chat/open?openChatId=<cid>`
+（以 markdown 链接展示，一行一会话）。一两句转述即可；
 只有出现值得注意的内容（与用户工作
 相关的讨论、疑似找人）才建议展开某个群，展开命令同上 `+chat-messages-list`。
 
@@ -471,7 +479,7 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
 - 事件诊断日志：`~/.local/state/lark-watch/events.log`（NDJSON，默认开启，路径
   见 `status` 输出的 `event_log` 字段）。每条消息的判定（`msg.keep`/`msg.drop`
   的 `reason`：p2p/at-me/keyword:…/ignore:…/self 等）、tick 摘要、stdout 事件
-  （`emit`）、通知链路（`notify.defer/flush/claim/replied/skip`，抑制与发送
+  （`emit`，超长分片 `emit.chunked`）、通知链路（`notify.defer/flush/claim/replied/skip`，抑制与发送
   失败带 mids：`notify.suppress`/`notify.fail`）、发卡锚点（`card.sent`/
   `card.book_sent`，改卡完成态 `card.done` 为 debug 级）、预约执行
   （`card.book`）、卡片动作
