@@ -22,6 +22,7 @@ type cardAction struct {
 	Action string `json:"action"`
 	Mid    string `json:"mid"`
 	Idx    int    `json:"idx"` // 发送/预约按钮的候选索引；旧卡片无此键，零值即候选 0
+	H      string `json:"h"`   // 候选内容指纹（contentHash）；旧卡片无此键，空值放行（信息不足不误杀）
 }
 
 // cardLogf 输出 [card] 前缀的 stderr 诊断日志（卡片链路专用），
@@ -142,6 +143,13 @@ func (h *CardHandler) handleDraft(ev CardEvent, act cardAction) {
 			updateCard(doneStale, -1)
 			return
 		}
+		if act.H != "" && act.H != contentHash(drafts[act.Idx]) {
+			// idx 在范围内但内容已被同 mid 重发覆盖：发出的必须是用户在
+			// 这张卡上看到的文本，指纹不符即失效
+			cardLogf("send: draft %d changed under %s, stale card", act.Idx, act.Mid)
+			updateCard(doneStale, -1)
+			return
+		}
 		if err := h.CLI.ReplyAsUser(act.Mid, drafts[act.Idx], format, act.Mid); err != nil {
 			updateCard(doneFailed, -1)
 			cardLogf("reply failed for %s (pending kept): %v", act.Mid, err)
@@ -204,6 +212,14 @@ func (h *CardHandler) handleBook(ev CardEvent, act cardAction, now int64) {
 	}
 
 	slot := bp.Slots[act.Idx]
+	if act.H != "" && act.H != contentHash(slot.Date+" "+slot.Time) {
+		// idx 在范围内但时段已被同 mid 重发覆盖：订的必须是用户在这张卡上
+		// 看到的时段，指纹不符即失效（认领作废、参数放回）
+		h.Store.BookPendingPut(act.Mid, bp, now)
+		cardLogf("book: slot %d changed under %s, stale card", act.Idx, act.Mid)
+		h.updateDoneCard(ev, bp.Card, doneStale, -1)
+		return
+	}
 	res, err := h.Booker.Book(context.Background(), slot, bp.Title, bp.Participants)
 	if err != nil {
 		be, isBook := err.(*BookError)

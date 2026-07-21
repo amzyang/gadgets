@@ -1,11 +1,21 @@
 package watch
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
 )
+
+// contentHash 是卡片按钮携带的内容指纹（sha256 前 8 hex）：同 mid 重发覆盖
+// pending 后，旧卡按钮的 idx 可能指向内容已不同的新候选，回调侧比对指纹保证
+// 「单击即发所见内容」——发的就是用户在卡片上看到的那条。
+func contentHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:4])
+}
 
 // Card 2.0 结构（仅本工具用到的子集），发送/复制草稿/忽略三按钮。
 // 发送按钮无二次确认弹窗（用户决策：单击即发，幂等键防连点）。
@@ -153,7 +163,7 @@ func RenderDraftCard(mid, scene, from, t, original string, drafts []string, form
 		}
 		c.Body.Elements = append(c.Body.Elements,
 			cardElement{Tag: "markdown", ElementID: fmt.Sprintf("draft-%d", i), Content: draftMD},
-			button(label, "primary_filled", map[string]any{"action": "send", "mid": mid, "idx": i}),
+			button(label, "primary_filled", map[string]any{"action": "send", "mid": mid, "idx": i, "h": contentHash(draft)}),
 		)
 	}
 	if note != "" {
@@ -186,7 +196,7 @@ func RenderBookCard(mid, scene, from, t, original string, slots []BookSlot, titl
 			// element_id 沿用 draft- 前缀：复用 RenderDoneCard 的 keepIdx 过滤
 			cardElement{Tag: "markdown", ElementID: fmt.Sprintf("draft-%d", i),
 				Content: fmt.Sprintf("%s **%s %s**", head, slot.Date, slot.Time)},
-			button(label, "primary_filled", map[string]any{"action": "book", "mid": mid, "idx": i}),
+			button(label, "primary_filled", map[string]any{"action": "book", "mid": mid, "idx": i, "h": contentHash(slot.Date + " " + slot.Time)}),
 		)
 	}
 	info := "标题：" + escapeCardMarkdown(oneline(title))

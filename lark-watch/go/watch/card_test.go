@@ -135,6 +135,13 @@ func cardEventIdx(eventID, token, action, mid string, idx int) []byte {
 		eventID, token, action, mid, idx))
 }
 
+// cardEventIdxH 构造带候选索引与内容指纹的回调事件（新版卡片按钮）。
+func cardEventIdxH(eventID, token, action, mid string, idx int, h string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"event_id":%q,"action_tag":"button","token":%q,"action_value":"{\"action\":\"%s\",\"mid\":\"%s\",\"idx\":%d,\"h\":\"%s\"}"}`,
+		eventID, token, action, mid, idx, h))
+}
+
 // cardEventMsg 构造带卡片自身 message_id 的回调事件（PATCH 兜底路径）。
 func cardEventMsg(eventID, token, msgID, action, mid string) []byte {
 	return []byte(fmt.Sprintf(
@@ -404,7 +411,7 @@ func TestRenderDraftCard(t *testing.T) {
 		"@周八 帮我看下 &#42;这个&#42; &#60;方案&#62;", // at 转 @名字 + 特殊字符转义
 		"**草稿**\\n\\n```\\n",                 // 代码围栏前空行
 		"'''稍后'''",                           // 草稿内围栏降级
-		`"action":"send","idx":0,"mid":"om_x"`,
+		fmt.Sprintf(`"action":"send","h":%q,"idx":0,"mid":"om_x"`, contentHash("好的，```稍后```回复")),
 		`"action":"copy"`,
 		`"action":"ignore"`,
 	} {
@@ -429,9 +436,9 @@ func TestRenderDraftCardMulti(t *testing.T) {
 	// 元素顺序：草稿① < 发送① < 草稿② < 发送② < 草稿③ < 发送③ < 复制 < 忽略
 	var last int
 	for _, marker := range []string{
-		"**草稿 ①**", `"action":"send","idx":0,"mid":"om_m"`,
-		"**草稿 ②**", `"action":"send","idx":1,"mid":"om_m"`,
-		"**草稿 ③**", `"action":"send","idx":2,"mid":"om_m"`,
+		"**草稿 ①**", fmt.Sprintf(`"action":"send","h":%q,"idx":0,"mid":"om_m"`, contentHash("先答应")),
+		"**草稿 ②**", fmt.Sprintf(`"action":"send","h":%q,"idx":1,"mid":"om_m"`, contentHash("先问细节")),
+		"**草稿 ③**", fmt.Sprintf(`"action":"send","h":%q,"idx":2,"mid":"om_m"`, contentHash("婉拒")),
 		"复制草稿", "忽略",
 	} {
 		i := strings.Index(card, marker)
@@ -489,7 +496,7 @@ func TestRenderDraftCardMarkdown(t *testing.T) {
 
 	for _, want := range []string{
 		"**草稿**\\n\\n看这段：\\n\\n```go\\nx := 1\\n```\\n跑一下", // 卡片方言：围栏前补空行
-		`"action":"send","idx":0,"mid":"om_md"`,
+		fmt.Sprintf(`"action":"send","h":%q,"idx":0,"mid":"om_md"`, contentHash("看这段：\n```go\nx := 1\n```\n跑一下")),
 	} {
 		if !strings.Contains(card, want) {
 			t.Errorf("card missing %q\n%s", want, card)
@@ -521,7 +528,7 @@ func TestRenderDraftCardMinimal(t *testing.T) {
 	for _, want := range []string{
 		`"schema":"2.0"`,
 		"**草稿**",
-		`"action":"send","idx":0,"mid":"om_min"`,
+		fmt.Sprintf(`"action":"send","h":%q,"idx":0,"mid":"om_min"`, contentHash("只有草稿")),
 		`"action":"copy"`,
 		`"action":"ignore"`,
 	} {
@@ -782,6 +789,62 @@ func TestCardBookMissingAndOutOfRange(t *testing.T) {
 	}
 }
 
+// 同 mid 重发覆盖 pending 后，旧卡按钮指纹不符：不发送（发的必须是用户在这张卡
+// 上看到的文本），改卡「已失效」，pending 保留给新卡；指纹相符照常发送。
+func TestCardSendStaleFingerprint(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	s.PendingPut("om_h1", []string{"草稿A"}, "text", testCardContent, 1)
+	s.PendingPut("om_h1", []string{"草稿B"}, "text", testCardContent, 2) // 重发覆盖
+
+	// 旧卡按钮仍携带草稿A 的指纹
+	handleCard(s, cli, "ou_SELF", cardEventIdxH("eh1", "tokh1", "send", "om_h1", 0, contentHash("草稿A")), 100)
+
+	if cli.hasCall("reply om_h1") {
+		t.Errorf("stale fingerprint must not send: %v", cli.calls)
+	}
+	if !cli.hasCall("已失效") {
+		t.Errorf("want stale card update: %v", cli.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_h1"); !ok {
+		t.Error("pending should be kept for the fresh card")
+	}
+
+	// 新卡按钮指纹相符：照常发送
+	handleCard(s, cli, "ou_SELF", cardEventIdxH("eh2", "tokh2", "send", "om_h1", 0, contentHash("草稿B")), 101)
+	if !cli.hasCall("reply om_h1 草稿B format=text") {
+		t.Errorf("matching fingerprint should send: %v", cli.calls)
+	}
+}
+
+// 预约按钮指纹不符（同 mid 重发改了时段）：不预订、认领作废参数放回、改卡
+// 「已失效」；指纹相符照常预订。
+func TestCardBookStaleFingerprint(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	booker := &fakeBooker{}
+	h, lines := bookHandler(s, cli, booker)
+	s.BookPendingPut("om_hb", testBookPending(), 1)
+
+	h.Handle(cardEventIdxH("ehb1", "tokhb1", "book", "om_hb", 1, contentHash("07-21 10:00-11:00")), 100)
+
+	if len(booker.calls) != 0 {
+		t.Errorf("stale fingerprint must not book: %v", booker.calls)
+	}
+	if _, ok := s.BookPendingGet("om_hb"); !ok {
+		t.Error("pending should be re-put after stale claim")
+	}
+	if !cli.hasCall("已失效") || len(*lines) != 0 {
+		t.Errorf("want stale card, no events: %v %v", cli.calls, *lines)
+	}
+
+	// 指纹相符：照常预订（slots[1] = 07-22 16:00-17:00）
+	h.Handle(cardEventIdxH("ehb2", "tokhb2", "book", "om_hb", 1, contentHash("07-22 16:00-17:00")), 101)
+	if len(booker.calls) != 1 {
+		t.Errorf("matching fingerprint should book: %v", booker.calls)
+	}
+}
+
 // 「忽略」：删 pending，改卡「已忽略」，不预订不发事件。
 func TestCardBookIgnore(t *testing.T) {
 	s := openTestStore(t)
@@ -810,8 +873,8 @@ func TestRenderBookCard(t *testing.T) {
 	var last int
 	for _, marker := range []string{
 		"明天下午对齐 &#42;方案&#42;",
-		"时段 ①", `"action":"book","idx":0,"mid":"om_rb"`,
-		"时段 ②", `"action":"book","idx":1,"mid":"om_rb"`,
+		"时段 ①", fmt.Sprintf(`"action":"book","h":%q,"idx":0,"mid":"om_rb"`, contentHash("07-22 14:00-15:00")),
+		"时段 ②", fmt.Sprintf(`"action":"book","h":%q,"idx":1,"mid":"om_rb"`, contentHash("07-22 16:00-17:00")),
 		"标题：方案对齐会", `"action":"book-ignore","mid":"om_rb"`,
 	} {
 		i := strings.Index(card, marker)
