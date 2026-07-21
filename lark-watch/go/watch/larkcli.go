@@ -22,7 +22,7 @@ type LarkCLI interface {
 	ReactAsUser(mid, emojiType string) error
 	SendTextAsBot(userID, text string) error
 	ChatAvatar(cid string) (string, error)
-	UserAvatar(openID string) (string, error)
+	UserAvatar(openID, name string) (string, error)
 	SendCardToUser(userID, cardJSON string) (cardMid string, err error)
 	UpdateCard(token, cardJSON string) error
 	PatchCard(cardMid, cardJSON string) error
@@ -237,31 +237,47 @@ func parseChatAvatar(out []byte) string {
 	return env.Data.Avatar
 }
 
-// UserAvatar 取用户头像 URL（contact API 裸端点，范式同 ReactAsUser；
-// avatar_240 对横幅小图足够）。
-func (c *ExecLarkCLI) UserAvatar(openID string) (string, error) {
-	out, err := c.run("api", "GET", "/open-apis/contact/v3/users/"+openID,
-		"--as", "user", "--params", `{"user_id_type":"open_id"}`)
+// UserAvatar 取用户头像 URL（avatar_240 对横幅小图足够）。不走
+// contact/v3/users get——它受应用通讯录数据授权范围限制，范围外同事一律
+// 41050 no user authority；改走用户搜索接口，判权基于用户可见性（聊天对象
+// 天然可见）：以发送者姓名为 query，结果按 open_id 精确匹配（重名不混）。
+// name 为空无从搜起，返回空串走负缓存。
+func (c *ExecLarkCLI) UserAvatar(openID, name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	params := struct {
+		Query    string `json:"query"`
+		PageSize string `json:"page_size"`
+	}{name, "20"}
+	out, err := c.run("api", "GET", "/open-apis/search/v1/user",
+		"--as", "user", "--params", encodeCompact(params))
 	if err != nil {
 		return "", err
 	}
-	return parseUserAvatar(out), nil
+	return parseUserAvatar(out, openID), nil
 }
 
-// parseUserAvatar 从 contact users get 响应提取 data.user.avatar.avatar_240；
-// 解析不出返回空串。
-func parseUserAvatar(out []byte) string {
+// parseUserAvatar 从 search/v1/user 响应按 open_id 精确匹配提取
+// avatar_240；无匹配（重名挤出首页、名字已变更）返回空串。
+func parseUserAvatar(out []byte, openID string) string {
 	var env struct {
 		Data struct {
-			User struct {
+			Users []struct {
+				OpenID string `json:"open_id"`
 				Avatar struct {
 					Avatar240 string `json:"avatar_240"`
 				} `json:"avatar"`
-			} `json:"user"`
+			} `json:"users"`
 		} `json:"data"`
 	}
 	json.Unmarshal(out, &env)
-	return env.Data.User.Avatar.Avatar240
+	for _, u := range env.Data.Users {
+		if u.OpenID == openID {
+			return u.Avatar.Avatar240
+		}
+	}
+	return ""
 }
 
 func (c *ExecLarkCLI) SendTextAsBot(userID, text string) error {

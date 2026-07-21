@@ -20,12 +20,13 @@ func TestAvatarResolveByChatType(t *testing.T) {
 		t.Fatalf("group 应走 ChatAvatar(cid): %v", f.calls)
 	}
 
-	p2p := Message{Cid: "oc_p", Ctype: "p2p", Fid: "ou_peer"}
+	from := "陈珊"
+	p2p := Message{Cid: "oc_p", Ctype: "p2p", Fid: "ou_peer", From: &from}
 	if got := r.Resolve([]Message{p2p}); got != "https://cdn/u.png" {
 		t.Fatalf("p2p: want 对方头像, got %q", got)
 	}
-	if !f.hasCall("user-avatar ou_peer") {
-		t.Fatalf("p2p 应走 UserAvatar(fid): %v", f.calls)
+	if !f.hasCall("user-avatar ou_peer 陈珊") {
+		t.Fatalf("p2p 应走 UserAvatar(fid, from): %v", f.calls)
 	}
 
 	// 批次取首条（与 batchNotifyEnv 一致）

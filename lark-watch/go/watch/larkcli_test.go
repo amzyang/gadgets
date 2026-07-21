@@ -83,13 +83,18 @@ func TestParseChatAvatar(t *testing.T) {
 }
 
 func TestParseUserAvatar(t *testing.T) {
+	// search/v1/user 响应：重名靠 open_id 精确匹配（陈珊 vs 陈珊珊）
+	multi := `{"ok":true,"data":{"users":[
+		{"name":"陈珊珊","open_id":"ou_other","avatar":{"avatar_240":"https://cdn/other240.png"}},
+		{"name":"陈珊","open_id":"ou_peer","avatar":{"avatar_240":"https://cdn/peer240.png","avatar_72":"https://cdn/peer72.png"}}]}}`
 	cases := map[string][2]string{
-		"有头像":    {`{"ok":true,"data":{"user":{"avatar":{"avatar_240":"https://cdn/u240.png","avatar_72":"https://cdn/u72.png"}}}}`, "https://cdn/u240.png"},
-		"缺字段":    {`{"ok":true,"data":{"user":{}}}`, ""},
-		"非 JSON": {`err`, ""},
+		"open_id 匹配": {multi, "https://cdn/peer240.png"},
+		"无匹配":        {`{"ok":true,"data":{"users":[{"open_id":"ou_other","avatar":{"avatar_240":"https://cdn/o.png"}}]}}`, ""},
+		"空结果":        {`{"ok":true,"data":{"users":[]}}`, ""},
+		"非 JSON":     {`err`, ""},
 	}
 	for name, c := range cases {
-		if got := parseUserAvatar([]byte(c[0])); got != c[1] {
+		if got := parseUserAvatar([]byte(c[0]), "ou_peer"); got != c[1] {
 			t.Errorf("%s: want %q, got %q", name, c[1], got)
 		}
 	}

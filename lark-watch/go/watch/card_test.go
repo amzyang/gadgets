@@ -66,8 +66,8 @@ func (f *fakeCLI) ChatAvatar(cid string) (string, error) {
 	}
 	return f.chatAvatarURL, nil
 }
-func (f *fakeCLI) UserAvatar(openID string) (string, error) {
-	f.record("user-avatar %s", openID)
+func (f *fakeCLI) UserAvatar(openID, name string) (string, error) {
+	f.record("user-avatar %s %s", openID, name)
 	if f.failAvatar {
 		return "", fmt.Errorf("api error")
 	}

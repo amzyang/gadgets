@@ -10,9 +10,9 @@ const (
 )
 
 // avatarResolver 解析通知横幅图标（飞书头像 URL）：群聊取群头像（key=cid）、
-// 私聊取对方头像（key=fid，p2p 发送者即对方）。feishucdn URL 匿名可拉，
-// alerter 自行下载渲染；坏 URL 不影响横幅投递。解析失败返回空串
-// （横幅无图标，不阻断通知）。
+// 私聊取对方头像（key=fid，p2p 发送者即对方，姓名供搜索接口做 query）。
+// feishucdn URL 匿名可拉，alerter 自行下载渲染；坏 URL 不影响横幅投递。
+// 解析失败返回空串（横幅无图标，不阻断通知）。
 type avatarResolver struct {
 	CLI   LarkCLI
 	Store *Store
@@ -36,7 +36,8 @@ func (r *avatarResolver) Resolve(batch []Message) string {
 func (r *avatarResolver) resolve(m Message) string {
 	key, fetch := m.Cid, r.CLI.ChatAvatar
 	if m.Ctype == "p2p" {
-		key, fetch = m.Fid, r.CLI.UserAvatar
+		key = m.Fid
+		fetch = func(fid string) (string, error) { return r.CLI.UserAvatar(fid, deref(m.From)) }
 	}
 	if key == "" {
 		return ""
