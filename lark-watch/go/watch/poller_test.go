@@ -18,6 +18,7 @@ type listFake struct {
 	chats       []ChatMeta
 	msgs        map[string]string // cid → raw JSON 响应
 	errs        map[string]error  // cid → ChatMessages 注入错误
+	searchResp  string            // Search 响应；空串返回空消息列表
 	chatCalls   []string
 	searchCalls int
 }
@@ -37,6 +38,9 @@ func (f *listFake) ChatMessages(cid, start string) ([]byte, error) {
 
 func (f *listFake) Search(start, end string) ([]byte, error) {
 	f.searchCalls++
+	if f.searchResp != "" {
+		return []byte(f.searchResp), nil
+	}
 	return []byte(emptyMessagesResp), nil
 }
 
@@ -514,6 +518,191 @@ func TestMarkRepliedSameMinute(t *testing.T) {
 		map[string]string{"oc_a": "2026-07-17 12:00"})
 	if events[0].Replied {
 		t.Error("same-minute self reply must not mark replied")
+	}
+}
+
+// 退避封顶：60,120,240,480 后恒为 600；大 fails 不得溢出为负/零（忙循环）。
+func TestBackoffWait(t *testing.T) {
+	for _, tc := range []struct {
+		fails int
+		want  int64
+	}{{1, 60}, {2, 120}, {4, 480}, {5, 600}, {10, 600}, {59, 600}, {64, 600}} {
+		if got := backoffWait(tc.fails); got != tc.want {
+			t.Errorf("backoffWait(%d) = %d, want %d", tc.fails, got, tc.want)
+		}
+	}
+}
+
+// 心跳缺口夹紧：过久（休眠唤醒/停机）时游标全部夹到当下、心跳刷新、过期延迟
+// 通知丢弃、记缺口起点（backlog 事件延后到成功 tick）；缺口未超限或首次运行
+// （无心跳）不动作。
+func TestClampStaleGap(t *testing.T) {
+	now := int64(100000)
+	p, events := newTestPoller(t, &listFake{}, now)
+	s := p.Store
+	s.SetFetchCursor("oc_a", 1000)
+	s.MetaSetInt("cursor", 1000)
+	s.MetaSetInt("heartbeat", now-MaxGap()-1)
+	s.NotifyDeferPut([]Message{{Mid: "om_old", Cid: "oc_a", T: "2026-07-17 12:00"}}, now-MaxGap()-1)
+
+	p.clampStaleGap()
+
+	if ts, _ := s.FetchCursor("oc_a"); ts != now {
+		t.Errorf("fetch cursor: got %d, want clamped to %d", ts, now)
+	}
+	if cur, _ := s.MetaGetInt("cursor"); cur != now {
+		t.Errorf("meta cursor: got %d, want %d", cur, now)
+	}
+	if hb, _ := s.MetaGetInt("heartbeat"); hb != now {
+		t.Errorf("heartbeat should refresh to %d (防重复夹紧), got %d", now, hb)
+	}
+	if msgs, _ := s.NotifyDeferTakeDue(1 << 40); len(msgs) != 0 {
+		t.Errorf("stale deferred notifications should be purged, got %v", msgs)
+	}
+	if len(*events) != 0 {
+		t.Fatalf("clamp must not emit (故障中 catchup 注定失败), got %q", *events)
+	}
+	if since, _ := s.MetaGetInt("backlog_since"); since != now-MaxGap()-1 {
+		t.Errorf("backlog_since = %d, want gap start %d", since, now-MaxGap()-1)
+	}
+
+	// 再次调用：心跳已刷新，无缺口，不重复夹紧
+	p.clampStaleGap()
+
+	// 成功 tick 后通报全程缺口并清除起点；再次调用不重发
+	p.emitPendingBacklog(now + 5)
+	if len(*events) != 1 || !strings.Contains(string((*events)[0]),
+		fmt.Sprintf(`"offline_secs":%d`, MaxGap()+6)) {
+		t.Fatalf("want 1 backlog event covering full gap, got %q", *events)
+	}
+	p.emitPendingBacklog(now + 6)
+	if len(*events) != 1 {
+		t.Errorf("cleared backlog_since must not re-emit, got %d events", len(*events))
+	}
+}
+
+// 轮询间隔超过 MaxGap 时阈值抬到 2×interval：gap≈interval 的稳态不夹紧
+// （否则每轮夹紧后 tick 只回看 listLookback，中段消息静默丢失），真缺口照夹。
+func TestClampStaleGapLongInterval(t *testing.T) {
+	now := int64(100000)
+	p, _ := newTestPoller(t, &listFake{}, now)
+	p.Interval = 1000 * time.Second // > MaxGap 900
+	s := p.Store
+	s.SetFetchCursor("oc_a", 1000)
+	s.MetaSetInt("heartbeat", now-1500) // MaxGap < gap <= 2×interval：稳态
+	p.clampStaleGap()
+	if ts, _ := s.FetchCursor("oc_a"); ts != 1000 {
+		t.Errorf("steady-state gap must not clamp, cursor = %d", ts)
+	}
+
+	s.MetaSetInt("heartbeat", now-2001) // 超过 2×interval：真缺口
+	p.clampStaleGap()
+	if ts, _ := s.FetchCursor("oc_a"); ts != now {
+		t.Errorf("real gap should clamp, cursor = %d", ts)
+	}
+}
+
+// 长故障期间隔轮重复夹紧（退避 600s < MaxGap 900s 使 gap 按 600/1200 交替）：
+// 缺口起点保最早、不重复发事件；恢复后一次性通报全程缺口时长。
+func TestBacklogEmitOnRecovery(t *testing.T) {
+	clock := int64(100000)
+	p, events := newTestPoller(t, &listFake{}, clock)
+	p.Now = func() int64 { return clock }
+	s := p.Store
+	s.MetaSetInt("heartbeat", clock-2000) // 缺口起点 98000
+
+	p.clampStaleGap()
+	clock += 1200 // 心跳被上次夹紧刷新后继续故障，隔轮再超限
+	p.clampStaleGap()
+	if len(*events) != 0 {
+		t.Fatalf("no events during outage, got %q", *events)
+	}
+	if since, _ := s.MetaGetInt("backlog_since"); since != 98000 {
+		t.Errorf("backlog_since = %d, want earliest start 98000", since)
+	}
+
+	clock += 100
+	p.emitPendingBacklog(clock)
+	if len(*events) != 1 || !strings.Contains(string((*events)[0]), `"offline_secs":3300`) {
+		t.Fatalf("want 1 backlog covering 98000→101300, got %q", *events)
+	}
+}
+
+// 首次运行无心跳键：不动作（无积压可言）。
+func TestClampStaleGapFirstRun(t *testing.T) {
+	p, events := newTestPoller(t, &listFake{}, 100000)
+	p.Store.SetFetchCursor("oc_a", 1000)
+	p.clampStaleGap()
+	if ts, _ := p.Store.FetchCursor("oc_a"); ts != 1000 {
+		t.Errorf("cursor must be kept on first run, got %d", ts)
+	}
+	if len(*events) != 0 {
+		t.Errorf("no events expected, got %q", *events)
+	}
+}
+
+// LW_SEARCH_EVERY=0 = 关闭 search 兜底：不除零 panic，也不调 Search。
+func TestTickSearchEveryZeroDisables(t *testing.T) {
+	t.Setenv("LW_SEARCH_EVERY", "0")
+	f := &listFake{}
+	p, _ := newTestPoller(t, f, 2000)
+	for i := int64(0); i < 3; i++ {
+		if err := p.tick(context.Background(), 2000+i, "ou_SELF"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.searchCalls != 0 {
+		t.Errorf("search should be disabled, got %d calls", f.searchCalls)
+	}
+}
+
+// LW_EARLY_STOP=0 = 永不早停：全部会话照常拉取，而不是一个都不拉。
+func TestTickEarlyStopZeroDisables(t *testing.T) {
+	t.Setenv("LW_EARLY_STOP", "0")
+	var chats []ChatMeta
+	for i := 0; i < 20; i++ {
+		chats = append(chats, ChatMeta{Cid: fmt.Sprintf("oc_%02d", i), Name: "群", Mode: "group"})
+	}
+	f := &listFake{chats: chats}
+	p, _ := newTestPoller(t, f, 2000)
+	for _, ch := range chats {
+		p.Store.SetFetchCursor(ch.Cid, 1000)
+	}
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.chatCalls) != len(chats) {
+		t.Errorf("want all %d chats fetched, got %d", len(chats), len(f.chatCalls))
+	}
+}
+
+// search 兜底成功推进游标；collect 失败（dedup 写库失败）游标不动——这批消息
+// 既没进 seen 也没发射，推进即永久丢失，下轮 search 以同窗口重试。
+func TestTickSearchCursorAdvanceOnlyOnSuccess(t *testing.T) {
+	resp := chatMsgsResp(false, rawMsgJSON("om_s", "ou_alice", "张三", "search 捞回", "2026-07-17 12:00"))
+	f := &listFake{searchResp: resp}
+	p, _ := newTestPoller(t, f, 2000)
+	p.Store.MetaSetInt("cursor", 1500)
+	if err := p.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := p.Store.MetaGetInt("cursor"); cur != 2000 {
+		t.Errorf("success path: cursor = %d, want 2000", cur)
+	}
+
+	// 注入 dedup 失败：seen 表缺失使 FilterNewMessages 报错
+	f2 := &listFake{searchResp: chatMsgsResp(false,
+		rawMsgJSON("om_s2", "ou_alice", "张三", "另一条", "2026-07-17 12:01"))}
+	p2, _ := newTestPoller(t, f2, 2000)
+	p2.Store.MetaSetInt("cursor", 1500)
+	if _, err := p2.Store.db.Exec(`DROP TABLE seen`); err != nil {
+		t.Fatal(err)
+	}
+	if err := p2.tick(context.Background(), 2000, "ou_SELF"); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := p2.Store.MetaGetInt("cursor"); cur != 1500 {
+		t.Errorf("dedup failure: cursor = %d, want kept at 1500", cur)
 	}
 }
 

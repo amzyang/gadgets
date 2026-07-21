@@ -181,7 +181,12 @@ type execer interface {
 }
 
 // trimToMax 滚动裁剪：仅保留表内 rowid 最新的 max 行（表名为编译期常量）。
+// max <= 0 = 不裁剪——LIMIT 0 的子查询为空集，NOT IN 会清空整表（含同事务
+// 刚插入的行），环境变量设 0 的直觉是「不设上限」而非「全删」。
 func trimToMax(x execer, table string, max int) error {
+	if max <= 0 {
+		return nil
+	}
 	_, err := x.Exec(fmt.Sprintf(
 		`DELETE FROM %s WHERE rowid NOT IN (SELECT rowid FROM %s ORDER BY rowid DESC LIMIT ?)`,
 		table, table), max)
@@ -217,7 +222,9 @@ func (s *Store) FilterNewMessages(msgs []Message, now int64, max int) ([]Message
 
 // ---------- handled（卡片事件去重，滚动 max 条）----------
 
-// HandledSeen 返回该事件是否已处理过；未处理则记录。
+// HandledSeen 返回该事件是否已处理过；未处理则记录。裁剪失败只留痕不报错：
+// INSERT 已提交，此处返回 error 会让调用方放弃执行动作，而重投递又被本记录
+// 判为重复——点击被静默吞掉。INSERT 本身失败仍报错（未记录，重投递可恢复）。
 func (s *Store) HandledSeen(eventID string, now int64, max int) (bool, error) {
 	res, err := s.db.Exec(`INSERT OR IGNORE INTO handled(event_id, ts) VALUES(?, ?)`, eventID, now)
 	if err != nil {
@@ -225,9 +232,11 @@ func (s *Store) HandledSeen(eventID string, now int64, max int) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		err = trimToMax(s.db, "handled", max)
+		if err := trimToMax(s.db, "handled", max); err != nil {
+			logf("handled trim failed: %v", err)
+		}
 	}
-	return n == 0, err
+	return n == 0, nil
 }
 
 // ---------- processed（补课已处理游标）----------

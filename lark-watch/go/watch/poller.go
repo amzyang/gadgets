@@ -37,8 +37,8 @@ const listLookback = 90
 // searchLookback 是 search 兜底的回看秒数：覆盖游标精度缺口，重复靠 seen 去重。
 const searchLookback = 120
 
-func earlyStopK() int   { return envInt("LW_EARLY_STOP", 8) }
-func searchEveryN() int { return envInt("LW_SEARCH_EVERY", 10) }
+func earlyStopK() int   { return envInt("LW_EARLY_STOP", 8) }    // <= 0 = 永不早停
+func searchEveryN() int { return envInt("LW_SEARCH_EVERY", 10) } // <= 0 = 关闭 search 兜底
 
 // notifyGraceSecs 是 P0 系统通知的延迟窗口：需要起草回复的 P0 先压住通知，
 // 等草稿卡片（send-card）发出后再展示；窗口内未发卡（模型判定无需回复、起草
@@ -98,23 +98,6 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		s.MetaSetInt("last_flush", p.now())
 	}
 
-	// 启动夹紧：上次心跳落后过久（停机）时全部游标置为当下，
-	// 积压交给 catchup，不洪泛实时 P0
-	if hb, ok := s.MetaGetInt("heartbeat"); ok {
-		if gap := p.now() - hb; gap > MaxGap() {
-			s.ClampFetchCursors(p.now())
-			s.MetaSetInt("cursor", p.now())
-			p.emit(Backlog{P: "backlog", OfflineSecs: gap})
-			logf("cursors clamped (offline %ds); 积压可用 catchup 拉取", gap)
-		}
-	}
-
-	// 上次运行遗留的延迟通知：新鲜的留给首轮 flush 照常释放，停机太久的
-	// 直接丢弃——重启后弹陈旧消息只会误导（对齐游标夹紧哲学）。
-	if n := s.NotifyDeferPurge(p.now() - MaxGap()); n > 0 {
-		logf("dropped %d stale deferred notification(s)", n)
-	}
-
 	logf("poller ready self=%s interval=%s digest=%ds/%dmsgs early-stop=%d search-every=%d",
 		self, p.Interval, p.DigestWindow, p.DigestMax, earlyStopK(), searchEveryN())
 
@@ -127,6 +110,7 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 			return nil
 		}
 
+		p.clampStaleGap()
 		nowEpoch := p.now()
 		// 到期兜底先于 tick：API 故障退避期间延迟通知也能按时释放
 		p.flushDueNotify(ctx, nowEpoch)
@@ -136,10 +120,7 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 				p.emit(NewAlert("auth", authAlertMsg(err)))
 				return err
 			}
-			wait := int64(60) << (fails - 1)
-			if wait > 600 {
-				wait = 600
-			}
+			wait := backoffWait(fails)
 			logf("tick failed (#%d), backoff %ds: %v", fails, wait, err)
 			if fails == 10 {
 				p.emit(NewAlert("api", "连续 10 次调用失败，仍在退避重试；详见 stderr"))
@@ -151,6 +132,7 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		}
 		fails = 0
 		s.MetaSetInt("heartbeat", nowEpoch)
+		p.emitPendingBacklog(nowEpoch)
 
 		lastFlush, _ := s.MetaGetInt("last_flush")
 		if ShouldFlush(s.DigestCount(), p.DigestMax, lastFlush, nowEpoch, p.DigestWindow) {
@@ -162,6 +144,65 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 			return nil
 		}
 	}
+}
+
+// backoffWait 是第 fails 次连续失败后的退避秒数：60,120,240,480 后封顶 600。
+// 不能一路左移——fails 达到 59 时溢出为负/零，退避退化成忙循环。
+func backoffWait(fails int) int64 {
+	if fails < 5 {
+		return int64(60) << (fails - 1)
+	}
+	return 600
+}
+
+// clampStaleGap 检测心跳缺口——停机重启、macOS 休眠唤醒、长时间 API 故障——
+// 过久时把全部游标夹到当下并丢弃过期的延迟通知：积压交给 catchup，不把
+// 数小时的旧消息当实时 P0 回放。每轮迭代都检查（不只启动时），休眠唤醒的
+// 缺口发生在进程存活期间。夹紧后立即刷新心跳：夹紧时刻即「状态干净时刻」，
+// 否则唤醒后首个 tick 失败（网络未恢复的常态）会让每轮重复夹紧。
+// 阈值对轮询间隔让步：interval 超过 MaxGap 时 gap≈interval 是稳态而非缺口，
+// 按 MaxGap 夹会让每轮 tick 只回看 listLookback，中段消息静默丢失。
+func (p *Poller) clampStaleGap() {
+	s := p.Store
+	hb, ok := s.MetaGetInt("heartbeat")
+	if !ok {
+		return // 首次运行：无历史心跳，无积压可言
+	}
+	now := p.now()
+	gap := now - hb
+	threshold := MaxGap()
+	if iv := 2 * int64(p.Interval/time.Second); iv > threshold {
+		threshold = iv
+	}
+	if gap <= threshold {
+		return
+	}
+	s.ClampFetchCursors(now)
+	s.MetaSetInt("cursor", now)
+	s.MetaSetInt("heartbeat", now)
+	// 缺口期间遗留的延迟通知：新鲜的留给下轮 flush 照常释放，太旧的直接
+	// 丢弃——弹陈旧消息只会误导（对齐游标夹紧哲学）。
+	if n := s.NotifyDeferPurge(now - MaxGap()); n > 0 {
+		logf("dropped %d stale deferred notification(s)", n)
+	}
+	// backlog 事件延后到恢复后的成功 tick（emitPendingBacklog）统一发：故障
+	// 期间 catchup 注定失败，逐次夹紧逐次发事件只是反复空唤醒 Monitor。这里
+	// 只记缺口起点，保最早（退避 600s < MaxGap 下长故障会隔轮重复夹紧）。
+	if since, _ := s.MetaGetInt("backlog_since"); since == 0 {
+		s.MetaSetInt("backlog_since", hb)
+	}
+	logf("cursors clamped (offline %ds); 积压可用 catchup 拉取", gap)
+}
+
+// emitPendingBacklog 在成功 tick 后通报累计的心跳缺口并清除起点标记：
+// OfflineSecs 覆盖从最早缺口到恢复的全程（起点持久在 meta，跨重启不丢）。
+func (p *Poller) emitPendingBacklog(now int64) {
+	since, _ := p.Store.MetaGetInt("backlog_since")
+	if since == 0 {
+		return
+	}
+	p.Store.MetaSetInt("backlog_since", 0)
+	p.emit(Backlog{P: "backlog", OfflineSecs: now - since})
 }
 
 // tick 执行一轮拉取：chat-list 活跃降序遍历 + 逐会话增量，外加低频 search 兜底。
@@ -269,9 +310,9 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 		return nil
 	}
 
-	streak := 0
+	streak, earlyK := 0, earlyStopK()
 	for _, ch := range chats {
-		if streak >= earlyStopK() {
+		if earlyK > 0 && streak >= earlyK {
 			break
 		}
 		restrictedAt, wasRestricted := s.RestrictedGet(ch.Cid)
@@ -330,7 +371,7 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 	}
 
 	// search 兜底对账：捞回 early-stop/active_time 排序理论上可能漏的，mid 去重天然合并
-	if p.tickN%searchEveryN() == 0 {
+	if n := searchEveryN(); n > 0 && p.tickN%n == 0 {
 		searchRan = true
 		cursor, _ := s.MetaGetInt("cursor")
 		raw, err := p.CLI.Search(fmtTS(cursor-searchLookback), fmtTS(nowEpoch))
@@ -341,10 +382,11 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 			logf("search fallback failed: %v", err)
 		} else if msgs, _, err := Trim(raw); err != nil {
 			logf("parse search response failed: %v", err)
+		} else if err := collect(msgs); err != nil {
+			// 游标不动（与逐会话路径的失败语义一致）：这批消息既没进 seen 也没
+			// 发射，推进即永久丢失——下轮 search 以同窗口重试
+			logf("dedup failed: %v", err)
 		} else {
-			if err := collect(msgs); err != nil {
-				logf("dedup failed: %v", err)
-			}
 			s.MetaSetInt("cursor", nowEpoch)
 		}
 	}

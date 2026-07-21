@@ -43,6 +43,20 @@ func TestSeenFilterAndCap(t *testing.T) {
 	}
 }
 
+// max <= 0 = 不裁剪：LIMIT 0 会让 NOT IN 匹配全表，把同事务刚插入的行一起清空
+// （LW_SEEN_MAX=0 触发每 tick 重复通知风暴）。
+func TestSeenCapZeroMeansUnlimited(t *testing.T) {
+	s := openTestStore(t)
+	fresh, err := s.FilterNewMessages([]Message{msg("m1"), msg("m2")}, 100, 0)
+	if err != nil || len(fresh) != 2 {
+		t.Fatalf("first pass: fresh=%v err=%v", fresh, err)
+	}
+	fresh, _ = s.FilterNewMessages([]Message{msg("m1"), msg("m2")}, 101, 0)
+	if len(fresh) != 0 {
+		t.Fatalf("second pass: want 0 fresh (seen 不应被清空), got %d", len(fresh))
+	}
+}
+
 func TestHandledDedup(t *testing.T) {
 	s := openTestStore(t)
 	dup, err := s.HandledSeen("e1", 100, 1000)
