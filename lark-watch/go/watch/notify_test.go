@@ -271,7 +271,7 @@ func TestAlerterDraftArgs(t *testing.T) {
 		t.Fatal("want ok")
 	}
 	for _, want := range []string{
-		`-actions "$8"`, `-closeLabel "忽略"`, "-timeout 60",
+		`out=$("$1" --title "$2" --message "$3" --actions "$8" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?`,
 		`"发送") exec "$4" send-draft --mid "$5" ;;`,
 		`"$9") exec "$4" send-text --mid "$5" --text "${10}" ;;`,
 		`"${11}") exec "$4" send-text --mid "$5" --text "${12}" ;;`,
@@ -312,6 +312,10 @@ func TestAlerterGenericVCArgs(t *testing.T) {
 	if !ok || script != alerterPlainScript || len(args) != 5 || args[3] != "msg" {
 		t.Errorf("no-mid generic: ok=%v script=%q args=%v", ok, script, args)
 	}
+	// alerter ≥26 只认双横线长旗标;调用失败须透传退出码(不再被 case 吞掉)。
+	if want := `out=$("$1" --title "$2" --message "$3" --actions "复制" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?`; !strings.Contains(script, want) {
+		t.Errorf("plain script missing %q:\n%s", want, script)
+	}
 	if _, args, _ := alerterGenericArgs(dir, "t", "msg", "", "话术", ""); args[3] != "话术" {
 		t.Errorf("draft should win copy text: %v", args)
 	}
@@ -333,6 +337,21 @@ func TestAlerterGenericVCArgs(t *testing.T) {
 	script, args, ok = alerterVCArgs("t", "msg", "lark://vc")
 	if !ok || !strings.Contains(script, `"加入"|"@CONTENTCLICKED"`) || args[3] != "lark://vc" {
 		t.Errorf("vc: ok=%v args=%v", ok, args)
+	}
+	if want := `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?`; !strings.Contains(script, want) {
+		t.Errorf("vc script missing %q:\n%s", want, script)
+	}
+}
+
+// startShellCmd 须捕捉秒退失败（旗标不兼容等启动即败场景），长驻横幅照常放行。
+// 回归背景：alerter 26 改用双横线旗标，旧调用瞬间 exit 64，但 Start 成功、
+// case 吞掉空输出，横幅从未出现且日志零错误——失败必须在启动窗口内可观察。
+func TestStartShellCmdEarlyExit(t *testing.T) {
+	if err := startShellCmd("exit 64", nil); err == nil {
+		t.Error("early non-zero exit should surface as error")
+	}
+	if err := startShellCmd("sleep 2", nil); err != nil {
+		t.Errorf("long-lived command should start cleanly: %v", err)
 	}
 }
 

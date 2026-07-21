@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ReadNotifyScript 读取通知命令脚本；文件缺失或全空白视为未配置（notify-vc 用，
@@ -336,18 +337,21 @@ func runNotifyScript(ctx context.Context, script string, env ...string) error {
 // 点横幅正文即主动作。alerter 阻塞至用户交互并把结果打到 stdout（动作按钮 =
 // 按钮文案、点正文 = @CONTENTCLICKED、关闭 = @CLOSED、超时 = @TIMEOUT），
 // 由 sh 片段消费分发；值经位置参数传入（不拼进脚本，防注入）。
-// 常驻按钮需在系统设置 → 通知里把 alerter 样式设为「提醒」。
+// 旗标为 alerter ≥26 的双横线语法（旧单横线写法会 exit 64）；调用失败经
+// `|| exit $?` 透传，不被 case 空匹配吞掉。通知以 alerter 默认
+// --sender com.apple.Terminal 名义投递，常驻按钮需在系统设置 → 通知里
+// 把「终端」样式设为「提醒」。
 const (
 	// 无快捷动作的通用横幅（无 mid 上下文：notify 子命令、失败提示）。
 	// $1 alerter $2 标题 $3 正文 $4 复制内容 $5 link
-	alerterPlainScript = `out=$("$1" -title "$2" -message "$3" -actions "复制" -closeLabel "忽略" -timeout 60 --ignore-dnd)
+	alerterPlainScript = `out=$("$1" --title "$2" --message "$3" --actions "复制" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?
 case "$out" in
 "复制") printf '%s' "$4" | pbcopy ;;
 "@CONTENTCLICKED") if [ -n "$5" ]; then open "$5"; fi ;;
 esac`
 	// VC 弹窗：「加入」或点正文 = open 首条 applink 入会。
 	// $1 alerter $2 标题 $3 正文 $4 link
-	alerterVCScript = `out=$("$1" -title "$2" -message "$3" -actions "加入" -closeLabel "忽略" -timeout 60 --ignore-dnd)
+	alerterVCScript = `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?
 case "$out" in
 "加入"|"@CONTENTCLICKED") open "$4" ;;
 esac`
@@ -369,7 +373,7 @@ func alerterActionScript(draft bool, actions []quickAction) string {
 		content = `"@CONTENTCLICKED") if [ -n "$5" ]; then open "$5"; fi ;;`
 	}
 	var b strings.Builder
-	b.WriteString(`out=$("$1" -title "$2" -message "$3" -actions "$8" -closeLabel "忽略" -timeout 60 --ignore-dnd)` + "\n")
+	b.WriteString(`out=$("$1" --title "$2" --message "$3" --actions "$8" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?` + "\n")
 	b.WriteString(`case "$out" in` + "\n")
 	b.WriteString(first + "\n")
 	for i, a := range actions {
@@ -389,7 +393,7 @@ func posParam(n int) string {
 	return fmt.Sprintf(`"${%d}"`, n)
 }
 
-// actionsCSV 是 alerter -actions 的单参 CSV（标签已在加载时清洗掉 ASCII 逗号）。
+// actionsCSV 是 alerter --actions 的单参 CSV（标签已在加载时清洗掉 ASCII 逗号）。
 func actionsCSV(first string, actions []quickAction) string {
 	labels := make([]string, 0, len(actions)+1)
 	labels = append(labels, first)
@@ -460,13 +464,28 @@ func runShellCmd(ctx context.Context, script string, args []string) error {
 	return cmd.Run()
 }
 
-// startShellCmd 同 runShellCmd 但 Start 后不等待（send-card 短命进程场景），
-// 父进程退出后横幅与动作分发继续存活。
+// startFailWindow 是 startShellCmd 捕捉秒退失败的观察窗口：启动即败（旗标
+// 不兼容、二进制缺失等）在数十毫秒内退出，正常横幅至少存活到用户交互/超时。
+const startFailWindow = 500 * time.Millisecond
+
+// startShellCmd 同 runShellCmd 但只在启动窗口内短暂观察（send-card 短命进程
+// 场景），窗口内非零秒退返回错误，存活则放手——父进程退出后横幅与动作分发
+// 继续存活。
 func startShellCmd(script string, args []string) error {
 	cmd := exec.Command("sh", append([]string{"-c", script, "sh"}, args...)...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(startFailWindow):
+		return nil
+	}
 }
 
 // builtinNotify 内置通知（notify 默认路径，响铃在调用方）：PATH 有 alerter 时

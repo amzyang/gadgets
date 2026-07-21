@@ -114,7 +114,7 @@ func loadQuickActions(configDir string) []quickAction {
 	return out
 }
 
-// quickLabel 清洗常用语的下拉标签：ASCII 逗号转中文（alerter -actions 按 ASCII
+// quickLabel 清洗常用语的下拉标签：ASCII 逗号转中文（alerter --actions 按 ASCII
 // 逗号切分 CSV）、超长截断加省略号；Value 仍发全文。
 func quickLabel(text string) string {
 	label := strings.ReplaceAll(text, ",", "，")
