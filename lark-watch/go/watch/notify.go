@@ -340,14 +340,14 @@ func runNotifyScript(ctx context.Context, script string, env ...string) error {
 const (
 	// 无快捷动作的通用横幅（无 mid 上下文：notify 子命令、失败提示）。
 	// $1 alerter $2 标题 $3 正文 $4 复制内容 $5 link
-	alerterPlainScript = `out=$("$1" -title "$2" -message "$3" -actions "复制" -closeLabel "忽略" -timeout 60)
+	alerterPlainScript = `out=$("$1" -title "$2" -message "$3" -actions "复制" -closeLabel "忽略" -timeout 60 --ignore-dnd)
 case "$out" in
 "复制") printf '%s' "$4" | pbcopy ;;
 "@CONTENTCLICKED") if [ -n "$5" ]; then open "$5"; fi ;;
 esac`
 	// VC 弹窗：「加入」或点正文 = open 首条 applink 入会。
 	// $1 alerter $2 标题 $3 正文 $4 link
-	alerterVCScript = `out=$("$1" -title "$2" -message "$3" -actions "加入" -closeLabel "忽略" -timeout 60)
+	alerterVCScript = `out=$("$1" -title "$2" -message "$3" -actions "加入" -closeLabel "忽略" -timeout 60 --ignore-dnd)
 case "$out" in
 "加入"|"@CONTENTCLICKED") open "$4" ;;
 esac`
@@ -369,7 +369,7 @@ func alerterActionScript(draft bool, actions []quickAction) string {
 		content = `"@CONTENTCLICKED") if [ -n "$5" ]; then open "$5"; fi ;;`
 	}
 	var b strings.Builder
-	b.WriteString(`out=$("$1" -title "$2" -message "$3" -actions "$8" -closeLabel "忽略" -timeout 60)` + "\n")
+	b.WriteString(`out=$("$1" -title "$2" -message "$3" -actions "$8" -closeLabel "忽略" -timeout 60 --ignore-dnd)` + "\n")
 	b.WriteString(`case "$out" in` + "\n")
 	b.WriteString(first + "\n")
 	for i, a := range actions {
