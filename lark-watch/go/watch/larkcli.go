@@ -21,6 +21,8 @@ type LarkCLI interface {
 	ReplyAsUser(mid, draft, format, idemKey string) error
 	ReactAsUser(mid, emojiType string) error
 	SendTextAsBot(userID, text string) error
+	ChatAvatar(cid string) (string, error)
+	UserAvatar(openID string) (string, error)
 	SendCardToUser(userID, cardJSON string) (cardMid string, err error)
 	UpdateCard(token, cardJSON string) error
 	PatchCard(cardMid, cardJSON string) error
@@ -212,6 +214,54 @@ func (c *ExecLarkCLI) ReactAsUser(mid, emojiType string) error {
 	_, err := c.run("api", "POST", "/open-apis/im/v1/messages/"+mid+"/reactions",
 		"--as", "user", "--data", encodeCompact(payload))
 	return err
+}
+
+// ChatAvatar 取群头像 URL（通知横幅图标）。p2p 会话该接口不返回 avatar
+// （chat-list 亦为 null），私聊头像走 UserAvatar。
+func (c *ExecLarkCLI) ChatAvatar(cid string) (string, error) {
+	out, err := c.run("im", "chats", "get", "--chat-id", cid, "--as", "user")
+	if err != nil {
+		return "", err
+	}
+	return parseChatAvatar(out), nil
+}
+
+// parseChatAvatar 从 `im chats get` 响应提取 data.avatar；解析不出返回空串。
+func parseChatAvatar(out []byte) string {
+	var env struct {
+		Data struct {
+			Avatar string `json:"avatar"`
+		} `json:"data"`
+	}
+	json.Unmarshal(out, &env)
+	return env.Data.Avatar
+}
+
+// UserAvatar 取用户头像 URL（contact API 裸端点，范式同 ReactAsUser；
+// avatar_240 对横幅小图足够）。
+func (c *ExecLarkCLI) UserAvatar(openID string) (string, error) {
+	out, err := c.run("api", "GET", "/open-apis/contact/v3/users/"+openID,
+		"--as", "user", "--params", `{"user_id_type":"open_id"}`)
+	if err != nil {
+		return "", err
+	}
+	return parseUserAvatar(out), nil
+}
+
+// parseUserAvatar 从 contact users get 响应提取 data.user.avatar.avatar_240；
+// 解析不出返回空串。
+func parseUserAvatar(out []byte) string {
+	var env struct {
+		Data struct {
+			User struct {
+				Avatar struct {
+					Avatar240 string `json:"avatar_240"`
+				} `json:"avatar"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	json.Unmarshal(out, &env)
+	return env.Data.User.Avatar.Avatar240
 }
 
 func (c *ExecLarkCLI) SendTextAsBot(userID, text string) error {

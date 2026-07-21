@@ -69,6 +69,32 @@ func TestParseSentMessageID(t *testing.T) {
 	}
 }
 
+func TestParseChatAvatar(t *testing.T) {
+	cases := map[string][2]string{
+		"群":       {`{"ok":true,"data":{"avatar":"https://cdn/g.jpg","name":"群A"}}`, "https://cdn/g.jpg"},
+		"p2p 无字段": {`{"ok":true,"data":{"chat_mode":"p2p"}}`, ""},
+		"非 JSON":  {`err`, ""},
+	}
+	for name, c := range cases {
+		if got := parseChatAvatar([]byte(c[0])); got != c[1] {
+			t.Errorf("%s: want %q, got %q", name, c[1], got)
+		}
+	}
+}
+
+func TestParseUserAvatar(t *testing.T) {
+	cases := map[string][2]string{
+		"有头像":    {`{"ok":true,"data":{"user":{"avatar":{"avatar_240":"https://cdn/u240.png","avatar_72":"https://cdn/u72.png"}}}}`, "https://cdn/u240.png"},
+		"缺字段":    {`{"ok":true,"data":{"user":{}}}`, ""},
+		"非 JSON": {`err`, ""},
+	}
+	for name, c := range cases {
+		if got := parseUserAvatar([]byte(c[0])); got != c[1] {
+			t.Errorf("%s: want %q, got %q", name, c[1], got)
+		}
+	}
+}
+
 func TestReplyArgs(t *testing.T) {
 	text := strings.Join(replyArgs("om_1", "草稿", "text", "om_1"), " ")
 	if !strings.Contains(text, "--text 草稿") || strings.Contains(text, "--markdown") {

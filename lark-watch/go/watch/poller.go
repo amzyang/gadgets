@@ -435,19 +435,19 @@ func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Mess
 	}
 	if len(vc) > 0 {
 		evlog.Info("notify.vc", "n", len(vc), "mids", mids(vc))
-		p.goNotify(func() { RunNotifyVC(ctx, p.Paths, vc) })
+		p.goNotify(func() { RunNotifyVC(ctx, p.Paths, vc, p.resolveIcon(vc)) })
 	}
 	if len(rest) == 0 {
 		return
 	}
 	if notifyGraceSecs() <= 0 {
 		evlog.Info("notify.now", "n", len(rest), "mids", mids(rest))
-		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, rest) })
+		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, rest, p.resolveIcon(rest)) })
 		return
 	}
 	if err := p.Store.NotifyDeferPut(rest, now+notifyGraceSecs()); err != nil {
 		logf("notify defer failed, notifying now: %v", err)
-		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, rest) })
+		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, rest, p.resolveIcon(rest)) })
 	} else {
 		evlog.Info("notify.defer", "n", len(rest), "mids", mids(rest), "due", now+notifyGraceSecs())
 	}
@@ -468,8 +468,14 @@ func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 	script, enabled := LoadNotifyScript(p.Paths.ConfigDir)
 	evlog.Info("notify.flush", "n", len(batch), "mids", mids(batch), "script", script != "", "enabled", enabled)
 	if enabled {
-		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, batch) })
+		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, batch, p.resolveIcon(batch)) })
 	}
+}
+
+// resolveIcon 在通知 goroutine 内解析批次头像（未命中缓存时付一次 lark-cli
+// exec，不得阻塞轮询主循环——调用点均在 goNotify 闭包内）。
+func (p *Poller) resolveIcon(batch []Message) string {
+	return (&avatarResolver{CLI: p.CLI, Store: p.Store, Now: p.Now}).Resolve(batch)
 }
 
 // mergeSelfLast 把单批提取结果并入 tick 级累积（保留每会话最大时间）。

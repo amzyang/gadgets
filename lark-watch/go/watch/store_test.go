@@ -566,3 +566,30 @@ func TestChatStateSelfLast(t *testing.T) {
 		t.Errorf("empty upsert should be no-op: %v", err)
 	}
 }
+
+func TestAvatarCache(t *testing.T) {
+	s := openTestStore(t)
+	if _, _, ok := s.AvatarGet("oc_a"); ok {
+		t.Fatal("empty store: want no avatar")
+	}
+	if err := s.AvatarSet("oc_a", "https://cdn/a.png", 1000); err != nil {
+		t.Fatal(err)
+	}
+	if url, at, ok := s.AvatarGet("oc_a"); !ok || url != "https://cdn/a.png" || at != 1000 {
+		t.Fatalf("get oc_a: %q %d %v, want https://cdn/a.png 1000 true", url, at, ok)
+	}
+	// upsert 覆盖
+	if err := s.AvatarSet("oc_a", "https://cdn/a2.png", 2000); err != nil {
+		t.Fatal(err)
+	}
+	if url, at, _ := s.AvatarGet("oc_a"); url != "https://cdn/a2.png" || at != 2000 {
+		t.Fatalf("upsert: %q %d, want https://cdn/a2.png 2000", url, at)
+	}
+	// 空 url 是合法负缓存
+	if err := s.AvatarSet("ou_b", "", 3000); err != nil {
+		t.Fatal(err)
+	}
+	if url, at, ok := s.AvatarGet("ou_b"); !ok || url != "" || at != 3000 {
+		t.Fatalf("negative cache: %q %d %v, want empty 3000 true", url, at, ok)
+	}
+}

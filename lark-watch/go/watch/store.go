@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS notify_wait (mid TEXT PRIMARY KEY, cid TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS chat_state (cid TEXT PRIMARY KEY, self_last TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS avatar (key TEXT PRIMARY KEY, url TEXT NOT NULL, fetched_at INTEGER NOT NULL);
 `
 
 func OpenStore(stateDir string) (*Store, error) {
@@ -282,6 +283,25 @@ func (s *Store) SetFetchCursor(cid string, ts int64) error {
 // ClampFetchCursors 停机重启时把全部游标夹到指定时刻（积压交给 catchup，不洪泛实时链路）。
 func (s *Store) ClampFetchCursors(ts int64) error {
 	_, err := s.db.Exec(`UPDATE fetched SET ts = ?`, ts)
+	return err
+}
+
+// ---------- avatar（通知横幅头像 URL 缓存）----------
+
+// AvatarGet 返回缓存的头像 URL 与写入时刻；无记录 ok=false。空 url 是合法的
+// 负缓存（拉取失败），TTL 判断在调用方（resolver 持时钟，store 保持纯读写）。
+func (s *Store) AvatarGet(key string) (url string, fetchedAt int64, ok bool) {
+	err := s.db.QueryRow(`SELECT url, fetched_at FROM avatar WHERE key = ?`, key).
+		Scan(&url, &fetchedAt)
+	return url, fetchedAt, err == nil
+}
+
+// AvatarSet 落盘头像 URL（upsert；空串 = 负缓存）。
+func (s *Store) AvatarSet(key, url string, now int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO avatar(key, url, fetched_at) VALUES(?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET url = excluded.url, fetched_at = excluded.fetched_at`,
+		key, url, now)
 	return err
 }
 

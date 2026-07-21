@@ -182,7 +182,8 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 		evlog.Info("notify.claim", "mid", mid, "n", len(msgs), "script", script != "", "enabled", enabled)
 		if msgs = dropReplied(s, msgs); len(msgs) > 0 && enabled {
 			// 候选①与 pending 键随通知下发：弹窗「复制」给待发话术、「发送」直接回复。
-			StartNotify(context.Background(), paths.ConfigDir, script, msgs, drafts[0], mid)
+			icon := (&avatarResolver{CLI: cli, Store: s}).Resolve(msgs)
+			StartNotify(context.Background(), paths.ConfigDir, script, msgs, drafts[0], mid, icon)
 		}
 	} else {
 		evlog.Debug("notify.claim", "mid", mid, "n", 0) // 常态（已超时弹出/补课路径），降 debug

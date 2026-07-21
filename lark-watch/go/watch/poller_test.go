@@ -607,6 +607,34 @@ func TestFlushDueNotifyDropsRepliedKeepsOthers(t *testing.T) {
 	}
 }
 
+// 通知头像：释放通知时按批次首条解析头像（p2p 走对方头像），经 LW_ICON
+// 抵达脚本，并落 SQLite 缓存（下次零 CLI 调用）。
+func TestFlushDueNotifyResolvesAvatar(t *testing.T) {
+	stubBell(t)
+	stubProbes(t, "net.kovidgoyal.kitty", 0)
+	f := &listFake{fakeCLI: fakeCLI{userAvatarURL: "https://cdn/u.png"}}
+	p, _ := newTestPoller(t, f, 2000)
+	out := filepath.Join(t.TempDir(), "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, p.Paths.ConfigDir, "notify", `printf '%s|%s' "$LW_MESSAGE" "$LW_ICON" > "$LW_TEST_OUT"`)
+	p.Store.NotifyDeferPut([]Message{
+		{From: strPtr("李四"), Cid: "oc_b", Fid: "ou_peer", Ctype: "p2p", Mid: "om_1",
+			Type: "text", Text: "帮我看下", T: "2026-07-17 12:00"},
+	}, 2180)
+
+	p.flushDueNotify(context.Background(), 2180)
+	if got := string(waitForFile(t, out)); got != "李四（私聊）: 帮我看下|https://cdn/u.png" {
+		t.Errorf("notify with icon: got %q", got)
+	}
+	p.notifyWG.Wait()
+	if !f.hasCall("user-avatar ou_peer") {
+		t.Errorf("p2p 应走 UserAvatar: %v", f.calls)
+	}
+	if url, _, ok := p.Store.AvatarGet("ou_peer"); !ok || url != "https://cdn/u.png" {
+		t.Errorf("avatar 应落缓存: %q %v", url, ok)
+	}
+}
+
 // 同分钟不算已回复：释放侧保持 selfRepliedAfter 的严格大于语义，宁可多提醒。
 func TestFlushDueNotifySameMinuteStillNotifies(t *testing.T) {
 	stubBell(t)

@@ -48,12 +48,12 @@ func stubProbes(t *testing.T, bundleID string, idleSecs float64) {
 
 // stubVCDialog 注入内置 VC 弹窗替身并以 channel 记录调用参数
 // （poller 侧经 go 异步调用，channel 才能安全跨 goroutine 断言）。
-func stubVCDialog(t *testing.T) chan [3]string {
+func stubVCDialog(t *testing.T) chan [4]string {
 	t.Helper()
-	calls := make(chan [3]string, 4)
+	calls := make(chan [4]string, 4)
 	old := vcDialogFn
-	vcDialogFn = func(_ context.Context, title, message, link string) error {
-		calls <- [3]string{title, message, link}
+	vcDialogFn = func(_ context.Context, title, message, link, icon string) error {
+		calls <- [4]string{title, message, link, icon}
 		return nil
 	}
 	t.Cleanup(func() { vcDialogFn = old })
@@ -61,14 +61,14 @@ func stubVCDialog(t *testing.T) chan [3]string {
 }
 
 // waitForDialog 等待弹窗替身被调用（RunNotifyVC 可能在 goroutine 里跑）。
-func waitForDialog(t *testing.T, calls chan [3]string) [3]string {
+func waitForDialog(t *testing.T, calls chan [4]string) [4]string {
 	t.Helper()
 	select {
 	case got := <-calls:
 		return got
 	case <-time.After(2 * time.Second):
 		t.Fatal("vc dialog not shown")
-		return [3]string{}
+		return [4]string{}
 	}
 }
 
@@ -105,7 +105,7 @@ func TestRunNotifySuppressed(t *testing.T) {
 
 	RunNotify(context.Background(), t.TempDir(), `touch "$LW_TEST_OUT"`, []Message{
 		{From: strPtr("张三"), Ctype: "p2p", Type: "text", Text: "在吗"},
-	})
+	}, "")
 
 	if _, err := os.Stat(out); err == nil {
 		t.Error("notify script ran, want suppressed")
@@ -140,13 +140,13 @@ func TestRunNotify(t *testing.T) {
 	stubProbes(t, "net.kovidgoyal.kitty", 0)
 	out := filepath.Join(t.TempDir(), "out")
 	t.Setenv("LW_TEST_OUT", out)
-	script := `printf '%s|%s|%s|%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_FROM" "$LW_CHAT" "$LW_TYPE" "$LW_TEXT" "$LW_LINK" "$LW_MESSAGE" > "$LW_TEST_OUT"`
+	script := `printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_FROM" "$LW_CHAT" "$LW_TYPE" "$LW_TEXT" "$LW_LINK" "$LW_MESSAGE" "$LW_ICON" > "$LW_TEST_OUT"`
 
 	RunNotify(context.Background(), t.TempDir(), script, []Message{
 		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat",
 			Link: "lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"},
 		{From: strPtr("张三"), Chat: strPtr("测试群"), Ctype: "group", Type: "text", Text: "帮我看个问题"},
-	})
+	}, "https://cdn/u.png")
 
 	b, err := os.ReadFile(out)
 	if err != nil {
@@ -154,7 +154,7 @@ func TestRunNotify(t *testing.T) {
 	}
 	want := "飞书 P0（2 条）|2|李四||video_chat||" +
 		"lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5|" +
-		"李四（私聊）: 发起了音视频会议\n张三（测试群）: 帮我看个问题"
+		"李四（私聊）: 发起了音视频会议\n张三（测试群）: 帮我看个问题|https://cdn/u.png"
 	if string(b) != want {
 		t.Errorf("got %q, want %q", b, want)
 	}
@@ -170,16 +170,16 @@ func TestRunNotifyVCBuiltin(t *testing.T) {
 	cases := []struct {
 		name  string
 		batch []Message
-		want  [3]string
+		want  [4]string
 	}{
 		{"单条", []Message{
 			{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: link1},
-		}, [3]string{"📞 音视频会议", "李四（私聊）: 发起了音视频会议", link1}},
+		}, [4]string{"📞 音视频会议", "李四（私聊）: 发起了音视频会议", link1, "https://cdn/u.png"}},
 		{"多条", []Message{
 			{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: link1},
 			{From: strPtr("张三"), Chat: strPtr("测试群"), Ctype: "group", Type: "vc_meeting", Link: link2},
-		}, [3]string{"📞 音视频会议（2 条）",
-			"李四（私聊）: 发起了音视频会议\n张三（测试群）: 发起了音视频会议", link1}},
+		}, [4]string{"📞 音视频会议（2 条）",
+			"李四（私聊）: 发起了音视频会议\n张三（测试群）: 发起了音视频会议", link1, "https://cdn/u.png"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -187,7 +187,7 @@ func TestRunNotifyVCBuiltin(t *testing.T) {
 			stubProbes(t, "net.kovidgoyal.kitty", 0)
 			calls := stubVCDialog(t)
 
-			RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, c.batch)
+			RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, c.batch, "https://cdn/u.png")
 
 			if got := waitForDialog(t, calls); got != c.want {
 				t.Errorf("dialog args:\n got %q\nwant %q", got, c.want)
@@ -208,12 +208,12 @@ func TestRunNotifyVCScript(t *testing.T) {
 	out := filepath.Join(dir, "out")
 	t.Setenv("LW_TEST_OUT", out)
 	writeConfig(t, dir, "notify-vc",
-		`printf '%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_TYPE" "$LW_LINK" "$LW_MESSAGE" > "$LW_TEST_OUT"`)
+		`printf '%s|%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_TYPE" "$LW_LINK" "$LW_MESSAGE" "$LW_ICON" > "$LW_TEST_OUT"`)
 
 	RunNotifyVC(context.Background(), Paths{ConfigDir: dir}, []Message{
 		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat",
 			Link: "lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"},
-	})
+	}, "https://cdn/u.png")
 
 	b, err := os.ReadFile(out)
 	if err != nil {
@@ -221,7 +221,7 @@ func TestRunNotifyVCScript(t *testing.T) {
 	}
 	want := "📞 音视频会议|1|video_chat|" +
 		"lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5|" +
-		"李四（私聊）: 发起了音视频会议"
+		"李四（私聊）: 发起了音视频会议|https://cdn/u.png"
 	if string(b) != want {
 		t.Errorf("got %q, want %q", b, want)
 	}
@@ -241,7 +241,7 @@ func TestRunNotifyVCSuppressed(t *testing.T) {
 
 	RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, []Message{
 		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: "lark://x"},
-	})
+	}, "")
 
 	if len(calls) != 0 {
 		t.Error("dialog shown, want suppressed")
@@ -266,12 +266,12 @@ func stubAlerter(t *testing.T, path string) {
 func TestAlerterDraftArgs(t *testing.T) {
 	stubAlerter(t, "/opt/bin/alerter")
 	// 空目录 = 内置默认动作：收到 / 好的，稍后回复 / 👍
-	script, args, ok := alerterDraftArgs(t.TempDir(), "标题", "摘要", "lark://x", "草稿内容", "om_1")
+	script, args, ok := alerterDraftArgs(t.TempDir(), "标题", "摘要", "lark://x", "草稿内容", "om_1", "https://cdn/a.png")
 	if !ok {
 		t.Fatal("want ok")
 	}
 	for _, want := range []string{
-		`out=$("$1" --title "$2" --message "$3" --actions "$8" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?`,
+		`out=$("$1" --title "$2" --message "$3" --actions "$8" --close-label "忽略" --timeout 60 --ignore-dnd --app-icon "${15}") || exit $?`,
 		`"发送") exec "$4" send-draft --mid "$5" ;;`,
 		`"$9") exec "$4" send-text --mid "$5" --text "${10}" ;;`,
 		`"${11}") exec "$4" send-text --mid "$5" --text "${12}" ;;`,
@@ -287,7 +287,8 @@ func TestAlerterDraftArgs(t *testing.T) {
 	}
 	want := []string{"/opt/bin/alerter", "标题", "摘要\n\n—— 回复草稿 ——\n草稿内容",
 		args[3], "om_1", "草稿内容", "lark://x", "发送,收到,好的，稍后回复,👍 回应",
-		"收到", "收到", "好的，稍后回复", "好的，稍后回复", "👍 回应", "THUMBSUP"}
+		"收到", "收到", "好的，稍后回复", "好的，稍后回复", "👍 回应", "THUMBSUP",
+		"https://cdn/a.png"}
 	if len(args) != len(want) {
 		t.Fatalf("args len %d, want %d: %v", len(args), len(want), args)
 	}
@@ -297,8 +298,14 @@ func TestAlerterDraftArgs(t *testing.T) {
 		}
 	}
 
+	// icon 空时不得带 --app-icon 旗标（--app-icon "" 行为未定义）
+	script, _, _ = alerterDraftArgs(t.TempDir(), "标题", "摘要", "lark://x", "草稿内容", "om_1", "")
+	if strings.Contains(script, "--app-icon") {
+		t.Errorf("empty icon must omit flag:\n%s", script)
+	}
+
 	stubAlerter(t, "")
-	if _, _, ok := alerterDraftArgs(t.TempDir(), "t", "m", "l", "d", "om_1"); ok {
+	if _, _, ok := alerterDraftArgs(t.TempDir(), "t", "m", "l", "d", "om_1", ""); ok {
 		t.Error("no alerter should fall back to osascript")
 	}
 }
@@ -308,37 +315,43 @@ func TestAlerterDraftArgs(t *testing.T) {
 func TestAlerterGenericVCArgs(t *testing.T) {
 	stubAlerter(t, "/opt/bin/alerter")
 	dir := t.TempDir()
-	script, args, ok := alerterGenericArgs(dir, "t", "msg", "lark://x", "", "")
-	if !ok || script != alerterPlainScript || len(args) != 5 || args[3] != "msg" {
+	script, args, ok := alerterGenericArgs(dir, "t", "msg", "lark://x", "", "", "")
+	if !ok || script != alerterPlainScript("") || len(args) != 6 || args[3] != "msg" || args[5] != "" {
 		t.Errorf("no-mid generic: ok=%v script=%q args=%v", ok, script, args)
 	}
 	// alerter ≥26 只认双横线长旗标;调用失败须透传退出码(不再被 case 吞掉)。
 	if want := `out=$("$1" --title "$2" --message "$3" --actions "复制" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?`; !strings.Contains(script, want) {
 		t.Errorf("plain script missing %q:\n%s", want, script)
 	}
-	if _, args, _ := alerterGenericArgs(dir, "t", "msg", "", "话术", ""); args[3] != "话术" {
+	// plain 带 icon：旗标引用 $6、args 末位携带 URL
+	script, args, _ = alerterGenericArgs(dir, "t", "msg", "lark://x", "", "", "https://cdn/a.png")
+	if !strings.Contains(script, `--ignore-dnd --app-icon "$6") || exit $?`) || args[5] != "https://cdn/a.png" {
+		t.Errorf("plain with icon: script=%q args=%v", script, args)
+	}
+	if _, args, _ := alerterGenericArgs(dir, "t", "msg", "", "话术", "", ""); args[3] != "话术" {
 		t.Errorf("draft should win copy text: %v", args)
 	}
 
-	script, args, ok = alerterGenericArgs(dir, "t", "msg", "lark://x", "", "om_9")
-	if !ok || len(args) != 14 || args[6] != "om_9" || args[7] != "复制,收到,好的，稍后回复,👍 回应" {
+	script, args, ok = alerterGenericArgs(dir, "t", "msg", "lark://x", "", "om_9", "https://cdn/a.png")
+	if !ok || len(args) != 15 || args[6] != "om_9" || args[7] != "复制,收到,好的，稍后回复,👍 回应" || args[14] != "https://cdn/a.png" {
 		t.Fatalf("mid generic: ok=%v args=%v", ok, args)
 	}
 	for _, want := range []string{
 		`"复制") printf '%s' "$4" | pbcopy ;;`,
 		`"$9") exec "$6" send-text --mid "$7" --text "${10}" ;;`,
 		`"${13}") exec "$6" react --mid "$7" --emoji "${14}" ;;`,
+		`--ignore-dnd --app-icon "${15}") || exit $?`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
 		}
 	}
 
-	script, args, ok = alerterVCArgs("t", "msg", "lark://vc")
-	if !ok || !strings.Contains(script, `"加入"|"@CONTENTCLICKED"`) || args[3] != "lark://vc" {
+	script, args, ok = alerterVCArgs("t", "msg", "lark://vc", "https://cdn/g.jpg")
+	if !ok || !strings.Contains(script, `"加入"|"@CONTENTCLICKED"`) || args[3] != "lark://vc" || args[4] != "https://cdn/g.jpg" {
 		t.Errorf("vc: ok=%v args=%v", ok, args)
 	}
-	if want := `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?`; !strings.Contains(script, want) {
+	if want := `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd --app-icon "$5") || exit $?`; !strings.Contains(script, want) {
 		t.Errorf("vc script missing %q:\n%s", want, script)
 	}
 }

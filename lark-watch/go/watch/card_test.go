@@ -12,10 +12,13 @@ const emptyMessagesResp = `{"ok":true,"data":{"messages":[],"has_more":false}}`
 
 // fakeCLI 记录调用并可注入失败（替代 bash 测试的 PATH shim）。
 type fakeCLI struct {
-	calls      []string
-	failReply  bool
-	failUpdate bool
-	failPatch  bool
+	calls         []string
+	failReply     bool
+	failUpdate    bool
+	failPatch     bool
+	failAvatar    bool
+	chatAvatarURL string
+	userAvatarURL string
 }
 
 func (f *fakeCLI) record(format string, args ...any) {
@@ -50,6 +53,20 @@ func (f *fakeCLI) ReactAsUser(mid, emojiType string) error {
 		return fmt.Errorf("api error")
 	}
 	return nil
+}
+func (f *fakeCLI) ChatAvatar(cid string) (string, error) {
+	f.record("chat-avatar %s", cid)
+	if f.failAvatar {
+		return "", fmt.Errorf("api error")
+	}
+	return f.chatAvatarURL, nil
+}
+func (f *fakeCLI) UserAvatar(openID string) (string, error) {
+	f.record("user-avatar %s", openID)
+	if f.failAvatar {
+		return "", fmt.Errorf("api error")
+	}
+	return f.userAvatarURL, nil
 }
 func (f *fakeCLI) SendTextAsBot(userID, text string) error {
 	f.record("send-text %s %s", userID, text)

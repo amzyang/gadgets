@@ -68,7 +68,7 @@ var vcDialogFn = builtinNotifyVC
 // 测试替身（IO 边缘：macOS 开发机跑测试不能真弹窗阻塞）。提示无消息上下文，
 // link/draft/mid 恒空——走 plain 横幅或「复制/OK」弹窗。
 var sendDraftAlertFn = func(ctx context.Context, configDir, title, message string) error {
-	return builtinNotify(ctx, configDir, title, message, "", "", "")
+	return builtinNotify(ctx, configDir, title, message, "", "", "", "")
 }
 
 // ringBell 响铃提醒（内置自 ~/.local/bin/bell 的 always 逻辑）：
@@ -190,10 +190,11 @@ func notifyGate(ctx context.Context) bool {
 // script 为空走内置「忽略/复制/跳转」弹窗；非空经 sh -c 执行，环境变量：
 // LW_TITLE 标题（多条带条数）、LW_MESSAGE/LW_SUMMARY 每条一行的聚合摘要、
 // LW_LINK 首条 applink（点击跳转）、LW_COUNT 条数、LW_FROM/LW_CHAT/
-// LW_CTYPE/LW_TYPE/LW_TEXT 取首条。飞书前台且用户活跃时整体跳过
-// （见 shouldSuppressNotify）。同步阻塞至命令退出——弹窗会等用户点击，
-// 调用方需自行 go；ctx 取消时子进程被终止。
-func RunNotify(ctx context.Context, configDir, script string, batch []Message) {
+// LW_CTYPE/LW_TYPE/LW_TEXT 取首条、LW_ICON 头像 URL（可为空）。
+// icon 是横幅图标（私聊对方/群头像 URL，空 = 默认图标）。飞书前台且用户
+// 活跃时整体跳过（见 shouldSuppressNotify）。同步阻塞至命令退出——弹窗会等
+// 用户点击，调用方需自行 go；ctx 取消时子进程被终止。
+func RunNotify(ctx context.Context, configDir, script string, batch []Message, icon string) {
 	if !notifyGate(ctx) {
 		return
 	}
@@ -201,9 +202,9 @@ func RunNotify(ctx context.Context, configDir, script string, batch []Message) {
 	if script == "" {
 		// 快捷动作落在批次代表消息上（最后一条，与 send-card --mid 惯例一致）
 		err = builtinNotify(ctx, configDir, batchTitle(p0NotifyTitle, len(batch)), batchSummary(batch),
-			batch[0].Link, "", batch[len(batch)-1].Mid)
+			batch[0].Link, "", batch[len(batch)-1].Mid, icon)
 	} else {
-		err = runNotifyScript(ctx, script, batchNotifyEnv(p0NotifyTitle, batch)...)
+		err = runNotifyScript(ctx, script, batchNotifyEnv(p0NotifyTitle, batch, icon)...)
 	}
 	if err != nil && ctx.Err() == nil {
 		logf("notify command failed: %v", err)
@@ -215,15 +216,15 @@ func RunNotify(ctx context.Context, configDir, script string, batch []Message) {
 // 改完即生效；LW_* 环境与通用批次一致，仅标题换 vcNotifyTitle），缺失时回退
 // 内置「忽略/加入」弹窗。抑制与响铃语义同 RunNotify；同步阻塞至弹窗关闭，
 // 调用方需自行 go。
-func RunNotifyVC(ctx context.Context, paths Paths, batch []Message) {
+func RunNotifyVC(ctx context.Context, paths Paths, batch []Message, icon string) {
 	if !notifyGate(ctx) {
 		return
 	}
 	var err error
 	if script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify-vc")); script != "" {
-		err = runNotifyScript(ctx, script, batchNotifyEnv(vcNotifyTitle, batch)...)
+		err = runNotifyScript(ctx, script, batchNotifyEnv(vcNotifyTitle, batch, icon)...)
 	} else {
-		err = vcDialogFn(ctx, batchTitle(vcNotifyTitle, len(batch)), batchSummary(batch), batch[0].Link)
+		err = vcDialogFn(ctx, batchTitle(vcNotifyTitle, len(batch)), batchSummary(batch), batch[0].Link, icon)
 	}
 	if err != nil && ctx.Err() == nil {
 		logf("vc notify failed: %v", err)
@@ -236,14 +237,14 @@ func RunNotifyVC(ctx context.Context, paths Paths, batch []Message) {
 // 内置弹窗正文展示候选①，按钮「忽略/复制并跳转/发送」（回车发送、Esc 忽略）——
 // 「复制并跳转」复制待发的回复并进飞书，「发送」调回本二进制 send-draft 直接
 // 以候选①回复对方（不必切回飞书）；自定义脚本经 LW_DRAFT/LW_MID 拿到同一信息。
-func StartNotify(ctx context.Context, configDir, script string, batch []Message, draft, mid string) {
+func StartNotify(ctx context.Context, configDir, script string, batch []Message, draft, mid, icon string) {
 	if !notifyGate(ctx) {
 		return
 	}
 	var err error
 	if script == "" {
 		title, summary := batchTitle(p0NotifyTitle, len(batch)), batchSummary(batch)
-		if s, args, ok := alerterDraftArgs(configDir, title, summary, batch[0].Link, draft, mid); ok {
+		if s, args, ok := alerterDraftArgs(configDir, title, summary, batch[0].Link, draft, mid, icon); ok {
 			err = startShellCmd(s, args)
 		} else if lines, argv, ok := builtinDraftNotifyArgs(title, summary, batch[0].Link, draft, mid); ok {
 			err = startOsascript(lines, argv)
@@ -253,7 +254,7 @@ func StartNotify(ctx context.Context, configDir, script string, batch []Message,
 		}
 	} else {
 		cmd := exec.Command("sh", "-c", script)
-		env := batchNotifyEnv(p0NotifyTitle, batch)
+		env := batchNotifyEnv(p0NotifyTitle, batch, icon)
 		if draft != "" {
 			env = append(env, "LW_DRAFT="+draft, "LW_MID="+mid)
 		}
@@ -268,8 +269,8 @@ func StartNotify(ctx context.Context, configDir, script string, batch []Message,
 }
 
 // batchNotifyEnv 是批次通知的完整 LW_* 环境：标题（多条带条数）、每条一行的
-// 聚合摘要、首条的链接与扩展字段。
-func batchNotifyEnv(titleBase string, batch []Message) []string {
+// 聚合摘要、首条的链接与扩展字段、头像 URL（LW_ICON，可为空）。
+func batchNotifyEnv(titleBase string, batch []Message, icon string) []string {
 	first := batch[0]
 	return append(notifyEnv(batchTitle(titleBase, len(batch)), batchSummary(batch), first.Link),
 		"LW_COUNT="+strconv.Itoa(len(batch)),
@@ -278,6 +279,7 @@ func batchNotifyEnv(titleBase string, batch []Message) []string {
 		"LW_CTYPE="+first.Ctype,
 		"LW_TYPE="+first.Type,
 		"LW_TEXT="+first.Text,
+		"LW_ICON="+icon,
 	)
 }
 
@@ -320,7 +322,7 @@ func RunNotifyCommand(ctx context.Context, paths Paths, title, message, link str
 	if script, _ := LoadNotifyScript(paths.ConfigDir); script != "" {
 		return runNotifyScript(ctx, script, notifyEnv(title, message, link)...)
 	}
-	return builtinNotify(ctx, paths.ConfigDir, title, message, link, "", "")
+	return builtinNotify(ctx, paths.ConfigDir, title, message, link, "", "", "")
 }
 
 // runNotifyScript 经 sh -c 执行脚本，消息字段由 LW_* 环境变量注入
@@ -341,29 +343,43 @@ func runNotifyScript(ctx context.Context, script string, env ...string) error {
 // `|| exit $?` 透传，不被 case 空匹配吞掉。通知以 alerter 默认
 // --sender com.apple.Terminal 名义投递，常驻按钮需在系统设置 → 通知里
 // 把「终端」样式设为「提醒」。
-const (
-	// 无快捷动作的通用横幅（无 mid 上下文：notify 子命令、失败提示）。
-	// $1 alerter $2 标题 $3 正文 $4 复制内容 $5 link
-	alerterPlainScript = `out=$("$1" --title "$2" --message "$3" --actions "复制" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?
+// alerterIconFlag 条件性生成 --app-icon 旗标引用（横幅左侧图标 = 飞书头像，
+// alerter 自行下载 URL，坏 URL 不影响横幅投递）：icon 为空返回空串——
+// --app-icon "" 行为未定义，不得带空旗标。n 是 icon 的位置参数索引；icon 值
+// 恒占 args 末位，布局不随空非空变化，仅旗标条件生成。
+func alerterIconFlag(icon string, n int) string {
+	if icon == "" {
+		return ""
+	}
+	return " --app-icon " + posParam(n)
+}
+
+// alerterPlainScript 无快捷动作的通用横幅（无 mid 上下文：notify 子命令、
+// 失败提示）。$1 alerter $2 标题 $3 正文 $4 复制内容 $5 link $6 icon
+func alerterPlainScript(icon string) string {
+	return `out=$("$1" --title "$2" --message "$3" --actions "复制" --close-label "忽略" --timeout 60 --ignore-dnd` + alerterIconFlag(icon, 6) + `) || exit $?
 case "$out" in
 "复制") printf '%s' "$4" | pbcopy ;;
 "@CONTENTCLICKED") if [ -n "$5" ]; then open "$5"; fi ;;
 esac`
-	// VC 弹窗：「加入」或点正文 = open 首条 applink 入会。
-	// $1 alerter $2 标题 $3 正文 $4 link
-	alerterVCScript = `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?
+}
+
+// alerterVCScript VC 弹窗：「加入」或点正文 = open 首条 applink 入会。
+// $1 alerter $2 标题 $3 正文 $4 link $5 icon
+func alerterVCScript(icon string) string {
+	return `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd` + alerterIconFlag(icon, 5) + `) || exit $?
 case "$out" in
 "加入"|"@CONTENTCLICKED") open "$4" ;;
 esac`
-)
+}
 
 // alerterActionScript 生成带快捷动作（常用语/表情）的横幅 sh 片段。
 // 位置参数布局（见 alerterDraftArgs/alerterGenericArgs）：$8 是动作 CSV，
-// $9 起每个快捷动作占两位（标签、值）。动作标签与值全部经位置参数按字面
-// 匹配/传参，脚本文本里只有 $n 索引、零用户内容——注入面与静态脚本一致。
-// 草稿横幅：首键「发送」回调 send-draft，点正文 = 复制并跳转；
-// 通用横幅：首键「复制」，点正文 = 跳转。关闭/超时 = 忽略。
-func alerterActionScript(draft bool, actions []quickAction) string {
+// $9 起每个快捷动作占两位（标签、值），icon 恒居末位 $(9+2k)。动作标签与值
+// 全部经位置参数按字面匹配/传参，脚本文本里只有 $n 索引、零用户内容——
+// 注入面与静态脚本一致。草稿横幅：首键「发送」回调 send-draft，点正文 =
+// 复制并跳转；通用横幅：首键「复制」，点正文 = 跳转。关闭/超时 = 忽略。
+func alerterActionScript(draft bool, actions []quickAction, icon string) string {
 	exeRef, midRef := `"$4"`, `"$5"`
 	first := fmt.Sprintf(`"发送") exec "$4" %s --%s "$5" ;;`, CmdSendDraft, FlagMid)
 	content := `"@CONTENTCLICKED") printf '%s' "$6" | pbcopy; if [ -n "$7" ]; then open "$7"; fi ;;`
@@ -373,7 +389,8 @@ func alerterActionScript(draft bool, actions []quickAction) string {
 		content = `"@CONTENTCLICKED") if [ -n "$5" ]; then open "$5"; fi ;;`
 	}
 	var b strings.Builder
-	b.WriteString(`out=$("$1" --title "$2" --message "$3" --actions "$8" --close-label "忽略" --timeout 60 --ignore-dnd) || exit $?` + "\n")
+	b.WriteString(`out=$("$1" --title "$2" --message "$3" --actions "$8" --close-label "忽略" --timeout 60 --ignore-dnd` +
+		alerterIconFlag(icon, 9+2*len(actions)) + `) || exit $?` + "\n")
 	b.WriteString(`case "$out" in` + "\n")
 	b.WriteString(first + "\n")
 	for i, a := range actions {
@@ -406,9 +423,9 @@ func actionsCSV(first string, actions []quickAction) string {
 // alerterDraftArgs 组装草稿横幅的 alerter 调用：正文展示摘要＋候选①，动作
 // 下拉 = 发送＋常用语＋表情（快捷动作每次现读配置）。位置参数布局：
 // $1 alerter $2 标题 $3 正文 $4 本二进制 $5 mid $6 候选① $7 link
-// $8 动作 CSV $9.. 每动作（标签, 值）对。
+// $8 动作 CSV $9.. 每动作（标签, 值）对，icon 恒居末位。
 // alerter 未安装或取不到自身可执行路径时 ok=false（回退 osascript 弹窗）。
-func alerterDraftArgs(configDir, title, message, link, draft, mid string) (script string, args []string, ok bool) {
+func alerterDraftArgs(configDir, title, message, link, draft, mid, icon string) (script string, args []string, ok bool) {
 	ap := lookAlerter()
 	exe, err := os.Executable()
 	if ap == "" || err != nil || draft == "" || mid == "" {
@@ -419,16 +436,17 @@ func alerterDraftArgs(configDir, title, message, link, draft, mid string) (scrip
 	for _, a := range actions {
 		args = append(args, a.Label, a.Value)
 	}
-	return alerterActionScript(true, actions), args, true
+	args = append(args, icon)
+	return alerterActionScript(true, actions, icon), args, true
 }
 
 // alerterGenericArgs 组装通用横幅的 alerter 调用：复制内容优先候选话术，
 // 无草稿回退正文。有 mid（P0 批次场景，取批次代表消息）时动作下拉 =
 // 复制＋常用语＋表情，位置参数布局：$1 alerter $2 标题 $3 正文 $4 复制内容
-// $5 link $6 本二进制 $7 mid $8 动作 CSV $9.. 每动作（标签, 值）对；
-// 无 mid（notify 子命令、失败提示）退回无快捷动作的 plain 版。
+// $5 link $6 本二进制 $7 mid $8 动作 CSV $9.. 每动作（标签, 值）对，icon
+// 恒居末位；无 mid（notify 子命令、失败提示）退回无快捷动作的 plain 版。
 // alerter 未安装时 ok=false。
-func alerterGenericArgs(configDir, title, message, link, draft, mid string) (script string, args []string, ok bool) {
+func alerterGenericArgs(configDir, title, message, link, draft, mid, icon string) (script string, args []string, ok bool) {
 	ap := lookAlerter()
 	if ap == "" {
 		return "", nil, false
@@ -436,23 +454,24 @@ func alerterGenericArgs(configDir, title, message, link, draft, mid string) (scr
 	copyText := cmp.Or(draft, message)
 	exe, err := os.Executable()
 	if mid == "" || err != nil {
-		return alerterPlainScript, []string{ap, title, message, copyText, link}, true
+		return alerterPlainScript(icon), []string{ap, title, message, copyText, link, icon}, true
 	}
 	actions := loadQuickActions(configDir)
 	args = []string{ap, title, message, copyText, link, exe, mid, actionsCSV("复制", actions)}
 	for _, a := range actions {
 		args = append(args, a.Label, a.Value)
 	}
-	return alerterActionScript(false, actions), args, true
+	args = append(args, icon)
+	return alerterActionScript(false, actions, icon), args, true
 }
 
 // alerterVCArgs 组装音视频会议弹窗的 alerter 调用；未安装时 ok=false。
-func alerterVCArgs(title, message, link string) (script string, args []string, ok bool) {
+func alerterVCArgs(title, message, link, icon string) (script string, args []string, ok bool) {
 	ap := lookAlerter()
 	if ap == "" {
 		return "", nil, false
 	}
-	return alerterVCScript, []string{ap, title, message, link}, true
+	return alerterVCScript(icon), []string{ap, title, message, link, icon}, true
 }
 
 // runShellCmd 以 sh -c 执行内置 shell 片段并阻塞至退出；值经位置参数传入
@@ -495,8 +514,8 @@ func startShellCmd(script string, args []string) error {
 // 脚本失败）。「复制」把候选话术（draft）置入剪贴板——复制到手的是自己要发的
 // 回复；无草稿（即时/兜底通知、notify 子命令）回退弹窗消息。argv 传参防
 // AppleScript 注入；60 秒无操作自动关闭，防弹窗进程堆积。
-func builtinNotify(ctx context.Context, configDir, title, message, link, draft, mid string) error {
-	if script, args, ok := alerterGenericArgs(configDir, title, message, link, draft, mid); ok {
+func builtinNotify(ctx context.Context, configDir, title, message, link, draft, mid, icon string) error {
+	if script, args, ok := alerterGenericArgs(configDir, title, message, link, draft, mid, icon); ok {
 		return runShellCmd(ctx, script, args)
 	}
 	lines, argv := builtinNotifyArgs(title, message, link, draft)
@@ -569,8 +588,8 @@ func builtinNotifyArgs(title, message, link, draft string) (lines, argv []string
 // 「忽略/加入」按钮、默认「加入」，点「加入」open 首条 applink 直达会话中的
 // 会议消息；「忽略」兼任 cancel button（Esc 即忽略）；60 秒无操作自动关闭，
 // 防弹窗进程堆积。VC 消息的 link 来自 message_app_link 恒有值，不设无 link 分支。
-func builtinNotifyVC(ctx context.Context, title, message, link string) error {
-	if script, args, ok := alerterVCArgs(title, message, link); ok {
+func builtinNotifyVC(ctx context.Context, title, message, link, icon string) error {
+	if script, args, ok := alerterVCArgs(title, message, link, icon); ok {
 		return runShellCmd(ctx, script, args)
 	}
 	return runOsascript(ctx, []string{

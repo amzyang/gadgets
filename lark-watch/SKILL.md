@@ -332,7 +332,9 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
   （一键回复/回应，见 `quick-replies`/`reactions` 配置）、**点横幅正文 =
   复制并跳转**、关闭按钮「忽略」；即时/兜底通知动作下拉 =「复制」＋常用语＋
   表情、点正文 = 跳转（快捷动作落在批次最后一条消息上）；VC 通知「加入」或
-  点正文即入会；均 60 秒超时。横幅以 alerter 默认 sender「终端」
+  点正文即入会；均 60 秒超时。横幅左侧图标显示飞书头像（私聊 = 对方头像、
+  群聊 = 群头像，取批次首条；URL 经 SQLite 缓存 7 天，拉取失败静默回退默认
+  图标，不阻断通知）。横幅以 alerter 默认 sender「终端」
   （com.apple.Terminal）名义投递；要有常驻按钮需在系统设置 → 通知里
   把「终端」的样式设为「提醒」（横幅样式几秒即逝）。
   未装 alerter 时用上述 osascript 弹窗（三键放不下，常用语/表情不可用）。用户说"来消息
@@ -347,7 +349,8 @@ post 富文本回复（对方看到渲染后的代码块），卡片预览也按
   P0 批次聚合为一次调用，消息经环境变量注入：`LW_TITLE` 标题（多条带条数）、
   `LW_MESSAGE`/`LW_SUMMARY` 每条一行的聚合摘要（`发送者（群名|私聊）: 正文`）、
   `LW_LINK` 首条 applink（点击跳转直达消息窗口）、`LW_COUNT` 条数、`LW_FROM`/
-  `LW_CHAT`/`LW_TEXT`/`LW_TYPE`/`LW_CTYPE` 取首条、`LW_DRAFT` 候选话术①与
+  `LW_CHAT`/`LW_TEXT`/`LW_TYPE`/`LW_CTYPE` 取首条、`LW_ICON` 头像 URL
+  （私聊对方/群头像，取首条，可能为空）、`LW_DRAFT` 候选话术①与
   `LW_MID` pending 键（仅草稿联动通知有值；自定义脚本可用
   `{SKILL_DIR}/bin/lark-watch send-draft --mid "$LW_MID"` 实现自己的发送按钮）。
   osascript 自定义脚本用 argv 传参，勿把 `$LW_*` 拼进源码——正文含引号会

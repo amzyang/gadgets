@@ -58,13 +58,13 @@ func waitForFile(t *testing.T, path string) []byte {
 func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 	logs := captureEvlog(t)
 	s := openTestStore(t)
-	cli := &fakeCLI{}
+	cli := &fakeCLI{chatAvatarURL: "https://cdn/g.jpg"}
 	rang := stubBell(t)
 	stubProbes(t, "net.kovidgoyal.kitty", 0)
 	dir := t.TempDir()
 	out := filepath.Join(t.TempDir(), "out")
 	t.Setenv("LW_TEST_OUT", out)
-	writeConfig(t, dir, "notify", `printf '%s|%s' "$LW_MESSAGE" "$LW_DRAFT" > "$LW_TEST_OUT"`)
+	writeConfig(t, dir, "notify", `printf '%s|%s|%s' "$LW_MESSAGE" "$LW_DRAFT" "$LW_ICON" > "$LW_TEST_OUT"`)
 	s.NotifyDeferPut([]Message{
 		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_1", Type: "text", Text: "在吗"},
 		{From: strPtr("张三"), Cid: "oc_a", Mid: "om_2", Type: "text", Text: "帮我看个问题"},
@@ -78,7 +78,7 @@ func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := "张三（私聊）: 在吗\n张三（私聊）: 帮我看个问题|好的，我看下"
+	want := "张三（私聊）: 在吗\n张三（私聊）: 帮我看个问题|好的，我看下|https://cdn/g.jpg"
 	if got := string(waitForFile(t, out)); got != want {
 		t.Errorf("notify message: got %q, want %q", got, want)
 	}
