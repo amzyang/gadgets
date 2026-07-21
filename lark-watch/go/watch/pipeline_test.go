@@ -166,6 +166,23 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+// 注释只认整行：行内 # 属内容（写入侧 ignore-add 按完整行校验，两侧解析一致），
+// 行首 #（含前导空白）整行跳过。
+func TestReadConfigLines(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "ignore", "# 整行注释\n  # 前导空白注释\n工单#\\d+ 自动通知\n\n收到\n")
+	got := readConfigLines(path)
+	want := []string{`工单#\d+ 自动通知`, "收到"}
+	if len(got) != len(want) {
+		t.Fatalf("lines = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 // Classify 判定理由全词表覆盖（诊断日志 msg.keep/msg.drop 的 reason 字段来源）。

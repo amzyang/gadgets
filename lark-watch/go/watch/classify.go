@@ -58,7 +58,9 @@ func LoadRules(self, watchlistPath, keywordsPath, ignorePath string) Rules {
 	return r
 }
 
-// readConfigLines 读取配置行：去 # 注释、修剪空白、跳过空行。
+// readConfigLines 读取配置行：跳过 # 开头的注释行与空行、修剪空白。
+// 注释只认整行——行内 # 属内容（正则/常用语常含 #），写入侧（ignore-add）
+// 按完整行校验，两侧解析必须一致，否则规则被静默放宽。
 func readConfigLines(path string) []string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -68,12 +70,8 @@ func readConfigLines(path string) []string {
 	var out []string
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		line := sc.Text()
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = line[:i]
-		}
-		line = strings.TrimSpace(line)
-		if line != "" {
+		line := strings.TrimSpace(sc.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
 			out = append(out, line)
 		}
 	}

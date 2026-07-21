@@ -35,6 +35,9 @@ func ParseDuration(s string) (int64, error) {
 
 // RunCatchup 补课：拉积压消息按会话分组输出单行 JSON。
 func RunCatchup(s *Store, cli LarkCLI, paths Paths, since string, peek int) error {
+	if peek < 0 {
+		peek = 0 // CLI 透传的每会话预览条数，负值按不预览处理（内部按 cap 分配切片）
+	}
 	self, err := cli.AuthSelf()
 	if err != nil {
 		return err
@@ -111,6 +114,11 @@ func RunMark(s *Store, cids []string, all bool, at int64) error {
 
 // RunIgnoreAdd 追加用户级噪音模式（正则校验通过才落盘）。
 func RunIgnoreAdd(paths Paths, pattern string) error {
+	// 读取侧（readConfigLines）把 # 开头的整行当注释：原样落盘的规则永不
+	// 生效，转义为等价的 \#（RE2 里 \# 即字面 #），校验与落盘同一形态。
+	if strings.HasPrefix(pattern, "#") {
+		pattern = `\` + pattern
+	}
 	if _, err := regexp.Compile(pattern); err != nil {
 		return fmt.Errorf("invalid regex, not added: %s (%v)", pattern, err)
 	}

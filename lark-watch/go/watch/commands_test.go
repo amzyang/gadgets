@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -500,5 +501,32 @@ func TestRunSendBookCard(t *testing.T) {
 	}
 	if !cli.hasCall("send-card ou_SELF") || !cli.hasCall("我要预约") {
 		t.Errorf("card not sent to self: %v", cli.calls)
+	}
+}
+
+// # 开头的合法正则原样落盘后会被读取侧（readConfigLines）当整行注释静默跳过：
+// 落盘前转义为等价的 \#，校验、落盘、读取三侧同一形态，规则真实生效。
+func TestRunIgnoreAddHashPrefix(t *testing.T) {
+	paths := Paths{ConfigDir: t.TempDir()}
+	if err := RunIgnoreAdd(paths, "#话题"); err != nil {
+		t.Fatal(err)
+	}
+	lines := readConfigLines(filepath.Join(paths.ConfigDir, ignoreFile))
+	if len(lines) != 1 {
+		t.Fatalf("ignore lines = %q, want 1 effective rule", lines)
+	}
+	if !regexp.MustCompile(lines[0]).MatchString("#话题 求关注") {
+		t.Errorf("escaped pattern %q should match literal #话题", lines[0])
+	}
+}
+
+// --peek 负值（flag 手误透传）按 0 处理：不在 CatchupGroup 的切片分配处
+// panic，照常输出分组结果（peek 列表为空）。
+func TestRunCatchupNegativePeek(t *testing.T) {
+	s := openTestStore(t)
+	f := &listFake{searchResp: chatMsgsResp(false,
+		rawMsgJSON("om_cp", "ou_alice", "张三", "积压消息", FmtMinute(time.Now().Unix())))}
+	if err := RunCatchup(s, f, Paths{ConfigDir: t.TempDir()}, "24h", -1); err != nil {
+		t.Fatal(err)
 	}
 }
