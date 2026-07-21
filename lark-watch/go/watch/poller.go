@@ -58,7 +58,7 @@ type Poller struct {
 	Interval     time.Duration
 	DigestWindow int64
 	DigestMax    int
-	Out          func(line []byte)
+	Out          func(line []byte) // 一次 emit 的完整字节；超长事件为多行 chunk 分片（emitLines）
 
 	Now func() int64 // 测试注入；默认 time.Now
 
@@ -82,8 +82,7 @@ func (p *Poller) now() int64 {
 }
 
 func (p *Poller) emit(v any) {
-	p.Out(EncodeLine(v))
-	logEmit(v)
+	emitLines(p.Out, v)
 }
 
 // Run 阻塞运行直到 ctx 取消；取消时 flush 摘要缓冲。

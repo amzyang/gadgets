@@ -228,6 +228,5 @@ func (h *CardHandler) emit(v any) {
 	if h.Out == nil {
 		return
 	}
-	h.Out(EncodeLine(v))
-	logEmit(v)
+	emitLines(h.Out, v)
 }
