@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -18,9 +20,12 @@ type fakeCLI struct {
 	failUpdate    bool
 	failPatch     bool
 	failAvatar    bool
+	failDownload  bool
 	onReply       func() // ReplyAsUser 后置钩子：在命令中途注错（如关库）用
 	chatAvatarURL string
 	userAvatarURL string
+	docsFetch     func(ctx context.Context, ref string) ([]byte, error) // DocsFetch 注入；nil = 默认成功响应
+	downloadName  string                                                // ResourceDownload 写入 destDir 的文件名；空 = "res.png"
 }
 
 func (f *fakeCLI) record(format string, args ...any) {
@@ -94,6 +99,29 @@ func (f *fakeCLI) PatchCard(cardMid, cardJSON string) error {
 		return fmt.Errorf("api error")
 	}
 	return nil
+}
+
+func (f *fakeCLI) DocsFetch(ctx context.Context, ref string) ([]byte, error) {
+	f.record("docs-fetch %s", ref)
+	if f.docsFetch != nil {
+		return f.docsFetch(ctx, ref)
+	}
+	return []byte(`{"ok":true,"data":{"document":{"document_id":"dox1","content":"# 测试文档\n\n正文内容"}}}`), nil
+}
+
+func (f *fakeCLI) ResourceDownload(ctx context.Context, mid, key, rtype, destDir string) (string, error) {
+	f.record("download %s %s %s", mid, key, rtype)
+	if f.failDownload {
+		return "", fmt.Errorf("api error")
+	}
+	name := f.downloadName
+	if name == "" {
+		name = "res.png"
+	}
+	if err := os.WriteFile(filepath.Join(destDir, name), []byte("data"), 0o644); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 func (f *fakeCLI) hasCall(substr string) bool {

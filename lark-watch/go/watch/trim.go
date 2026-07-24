@@ -63,7 +63,9 @@ func toMessage(m rawMessage) Message {
 		Text:  truncateRunes(m.Content, 500),
 		Link:  toLarkScheme(m.MessageAppLink),
 		T:     m.CreateTime,
-		AtIDs: atIDs,
+		// 资源检测吃截断前的全量 content：卡片分享的文档 URL 常在 500 码点之后
+		Resources: DetectResources(m.MessageID, m.MsgType, m.Content),
+		AtIDs:     atIDs,
 	}
 }
 

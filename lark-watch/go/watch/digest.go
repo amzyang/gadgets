@@ -6,10 +6,12 @@ import (
 	"strings"
 )
 
+// 非文本占位符模式（normalizeMedia 归一 + DetectResources 提取 key 共用，
+// 单一事实源）：图片捕获组 1 = image_key，文件捕获组 1 = file_key、2 = name。
 var (
-	imgMarkdownRe = regexp.MustCompile(`!\[Image\]\([^)]*\)`)
-	imgBracketRe  = regexp.MustCompile(`\[Image: [^\]]*\]`)
-	fileTagRe     = regexp.MustCompile(`<file key="[^"]*"(?: name="([^"]*)")?[^>]*>`)
+	imgMarkdownRe = regexp.MustCompile(`!\[Image\]\(([^)]*)\)`)
+	imgBracketRe  = regexp.MustCompile(`\[Image: ([^\]]*)\]`)
+	fileTagRe     = regexp.MustCompile(`<file key="([^"]*)"(?: name="([^"]*)")?[^>]*>`)
 	cardTitleRe   = regexp.MustCompile(`^<card title="([^"]*)"`)
 )
 
@@ -29,8 +31,8 @@ func normalizeMedia(text string) string {
 	text = imgMarkdownRe.ReplaceAllString(text, "[图片]")
 	text = imgBracketRe.ReplaceAllString(text, "[图片]")
 	return fileTagRe.ReplaceAllStringFunc(text, func(tag string) string {
-		if m := fileTagRe.FindStringSubmatch(tag); m[1] != "" {
-			return "[文件:" + m[1] + "]"
+		if m := fileTagRe.FindStringSubmatch(tag); m[2] != "" {
+			return "[文件:" + m[2] + "]"
 		}
 		return "[文件]"
 	})
@@ -71,10 +73,11 @@ func BuildDigest(msgs []Message) Digest {
 			chat = cid
 		}
 		chats = append(chats, DigestChat{
-			Chat: chat,
-			Cid:  cid,
-			N:    g.n,
-			Peek: truncateRunes(from+": "+normalizeMedia(g.latest.Text), 60),
+			Chat:      chat,
+			Cid:       cid,
+			N:         g.n,
+			Peek:      truncateRunes(from+": "+normalizeMedia(g.latest.Text), 60),
+			Resources: capResources(g.latest.Resources, digestResPerChat),
 		})
 	}
 	sort.Slice(chats, func(i, j int) bool {

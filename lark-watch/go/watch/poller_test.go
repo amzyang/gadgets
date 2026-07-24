@@ -83,7 +83,7 @@ func TestFlushDigestTakeFailureLogged(t *testing.T) {
 	p, events := newTestPoller(t, &listFake{}, 1000)
 	p.Store.Close()
 
-	p.flushDigest()
+	p.flushDigest(context.Background())
 
 	if len(*events) != 0 {
 		t.Errorf("no digest expected, got %d", len(*events))

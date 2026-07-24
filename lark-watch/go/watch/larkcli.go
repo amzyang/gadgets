@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -27,6 +28,10 @@ type LarkCLI interface {
 	UpdateCard(token, cardJSON string) error
 	PatchCard(cardMid, cardJSON string) error
 	EventConsumeCmd(ctx context.Context) *exec.Cmd
+	// DocsFetch 拉取云文档 Markdown 正文（预取链路；ref 为 URL 或 token）。
+	DocsFetch(ctx context.Context, ref string) ([]byte, error)
+	// ResourceDownload 下载消息资源（图片/文件）到 destDir，返回实际文件名。
+	ResourceDownload(ctx context.Context, mid, key, rtype, destDir string) (string, error)
 }
 
 // messages-search 的实现边界：单次调用最多 searchMaxPages 页 × searchPageSize 条，
@@ -87,10 +92,17 @@ func (c *ExecLarkCLI) bin() string {
 }
 
 // run 执行命令并要求信封 ok==true；调用与结果经 logCmd 留痕（三个出口都覆盖）。
-func (c *ExecLarkCLI) run(args ...string) (out []byte, err error) {
+func (c *ExecLarkCLI) run(args ...string) ([]byte, error) {
+	return c.runCtx(context.Background(), "", args...)
+}
+
+// runCtx 是 run 的 ctx/cwd 变体（预取链路：单资源超时经 ctx 传入；下载须指定
+// 工作目录——--output 只接受相对路径）。dir 空串沿用当前目录。
+func (c *ExecLarkCLI) runCtx(ctx context.Context, dir string, args ...string) (out []byte, err error) {
 	start := time.Now()
 	defer func() { logCmd(c.bin(), args, time.Since(start), len(out), err) }()
-	cmd := exec.Command(c.bin(), args...)
+	cmd := exec.CommandContext(ctx, c.bin(), args...)
+	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -138,7 +150,7 @@ func parseAuthStatus(out []byte) (AuthInfo, error) {
 	}
 	u := st.Identities.User
 	if !u.Available || u.OpenID == "" {
-		return AuthInfo{}, fmt.Errorf("auth status: user identity unavailable, run `lark-cli auth login --domain im,contact`")
+		return AuthInfo{}, fmt.Errorf("auth status: user identity unavailable, run `lark-cli auth login --domain im,contact,docs`")
 	}
 	return AuthInfo{OpenID: u.OpenID, RefreshExpiresAt: u.RefreshExpiresAt}, nil
 }
@@ -342,4 +354,57 @@ func (c *ExecLarkCLI) PatchCard(cardMid, cardJSON string) error {
 // 进程监督在 run.go）。
 func (c *ExecLarkCLI) EventConsumeCmd(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, c.bin(), "event", "consume", "card.action.trigger", "--as", "bot")
+}
+
+// DocsFetch 拉取云文档 Markdown 正文（docx/wiki URL 或 token 均可）。
+func (c *ExecLarkCLI) DocsFetch(ctx context.Context, ref string) ([]byte, error) {
+	return c.runCtx(ctx, "", "docs", "+fetch", "--doc", ref,
+		"--doc-format", "markdown", "--as", "user", "--format", "json")
+}
+
+// parseDocsFetch 提取 data.document.content（markdown），标题取首个非空行的
+// `# ` 标题（没有则空）。
+func parseDocsFetch(out []byte) (title, content string, err error) {
+	var env struct {
+		Data struct {
+			Document struct {
+				Content string `json:"content"`
+			} `json:"document"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		return "", "", err
+	}
+	content = env.Data.Document.Content
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if t, ok := strings.CutPrefix(line, "# "); ok {
+			title = strings.TrimSpace(t)
+		}
+		break
+	}
+	return title, content, nil
+}
+
+// ResourceDownload 下载消息资源到 destDir（须已存在）：cwd 切到 destDir 且
+// 省略 --output——CLI 用服务端 Content-Disposition 文件名并自动推断扩展名，
+// 事后扫目录取实际文件名（每资源独占一个目录，首个文件即产物）。
+func (c *ExecLarkCLI) ResourceDownload(ctx context.Context, mid, key, rtype, destDir string) (string, error) {
+	if _, err := c.runCtx(ctx, destDir, "im", "+messages-resources-download",
+		"--message-id", mid, "--file-key", key, "--type", rtype, "--as", "user"); err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return e.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("download produced no file in %s", destDir)
 }

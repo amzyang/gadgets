@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS chat_state (cid TEXT PRIMARY KEY, self_last TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS avatar (key TEXT PRIMARY KEY, url TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS res_cache (ref TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, fetched_at INTEGER NOT NULL);
 `
 
 func OpenStore(stateDir string) (*Store, error) {
@@ -312,6 +313,37 @@ func (s *Store) AvatarSet(key, url string, now int64) error {
 		`INSERT INTO avatar(key, url, fetched_at) VALUES(?, ?, ?)
 		 ON CONFLICT(key) DO UPDATE SET url = excluded.url, fetched_at = excluded.fetched_at`,
 		key, url, now)
+	return err
+}
+
+// ---------- res_cache（预取产物缓存：ref → 本地产物关联，跨消息复用）----------
+
+// ResCacheEntry 是一条预取产物记录。Ref 是缓存键：doc 为归一化 token
+// （docCacheKey），image/file 为 "kind:file_key"。TTL 判断在调用方
+// （Prefetcher 持时钟，store 保持纯读写，对齐 avatar 缓存哲学）。
+type ResCacheEntry struct {
+	Ref, Kind, Name, Path string
+	FetchedAt             int64
+}
+
+func (s *Store) ResCacheGet(ref string) (ResCacheEntry, bool) {
+	e := ResCacheEntry{Ref: ref}
+	err := s.db.QueryRow(`SELECT kind, name, path, fetched_at FROM res_cache WHERE ref = ?`, ref).
+		Scan(&e.Kind, &e.Name, &e.Path, &e.FetchedAt)
+	return e, err == nil
+}
+
+func (s *Store) ResCachePut(e ResCacheEntry) error {
+	_, err := s.db.Exec(
+		`INSERT INTO res_cache(ref, kind, name, path, fetched_at) VALUES(?, ?, ?, ?, ?)
+		 ON CONFLICT(ref) DO UPDATE SET kind = excluded.kind, name = excluded.name, path = excluded.path, fetched_at = excluded.fetched_at`,
+		e.Ref, e.Kind, e.Name, e.Path, e.FetchedAt)
+	return err
+}
+
+// ResCacheSweep 删除 fetched_at 早于 before 的缓存行（随 spool 产物同龄清扫）。
+func (s *Store) ResCacheSweep(before int64) error {
+	_, err := s.db.Exec(`DELETE FROM res_cache WHERE fetched_at < ?`, before)
 	return err
 }
 

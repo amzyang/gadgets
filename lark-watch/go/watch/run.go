@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -29,7 +30,7 @@ func authAlertMsg(err error) string {
 	if errors.Is(err, exec.ErrNotFound) {
 		return "lark-cli 未安装或不在 PATH：npm i -g @larksuite/cli 后重启 Monitor"
 	}
-	return "user 身份不可用：请运行 lark-cli auth login --domain im,contact，完成后重启 Monitor"
+	return "user 身份不可用：请运行 lark-cli auth login --domain im,contact,docs，完成后重启 Monitor"
 }
 
 // authExpiringMsg 在 user token 刷新期不足 24h 时返回提醒文案；零值视为未知不告警。
@@ -76,6 +77,10 @@ func RunDaemon(ctx context.Context, s *Store, cli LarkCLI, paths Paths, interval
 		Store: s, CLI: cli, Paths: paths,
 		Interval: interval, DigestWindow: digestWindow, DigestMax: digestMax,
 		Out: w.Write,
+	}
+	if prefetchEnabled() {
+		p.Prefetch = &Prefetcher{CLI: cli, Store: s,
+			SpoolDir: filepath.Join(paths.StateDir, "prefetch")}
 	}
 	err = p.Run(ctx, self)
 	cancel() // poller 结束（auth 失效或取消）时同步停掉卡片链路

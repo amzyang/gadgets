@@ -48,8 +48,25 @@ type Message struct {
 	Fid     string   `json:"fid"`
 	Ftype   string   `json:"ftype"`
 	Link    string   `json:"link"`
-	AtIDs   []string `json:"-"` // mentions 的 open_id 列表；仅供分级判 @我，不进事件 JSON
-	Reason  string   `json:"-"` // Classify 判定理由（keep/drop 皆有），仅供诊断日志，不进事件 JSON
+	// Resources 是消息携带的可预取资源（toMessage 对截断前全量 content 检测；
+	// P0 emit 前 / digest flush 时由 Prefetcher 回填内容），缺省不出现。
+	Resources []Resource `json:"resources,omitempty"`
+	AtIDs     []string   `json:"-"` // mentions 的 open_id 列表；仅供分级判 @我，不进事件 JSON
+	Reason    string     `json:"-"` // Classify 判定理由（keep/drop 皆有），仅供诊断日志，不进事件 JSON
+}
+
+// Resource 是消息携带的可预取外部资源（云文档链接/图片/文件附件）。
+// 检测（DetectResources）只填 Kind/Ref/Name/Mid；预取（Prefetcher.Fetch）
+// 回填 Path/Content/Err——三者互斥程度见各字段注释，Err 非空时模型走
+// 手动获取回退。
+type Resource struct {
+	Kind    string `json:"kind"`              // doc | image | file
+	Name    string `json:"name,omitempty"`    // 文件名 / 文档标题（fetch 后回填）
+	Ref     string `json:"ref"`               // doc: URL；image/file: file_key
+	Mid     string `json:"mid"`               // 所属消息（下载凭证；回退手取也要）
+	Path    string `json:"path,omitempty"`    // 本地产物（图片/文件；文档全文落盘）
+	Content string `json:"content,omitempty"` // 内联文本（仅 doc，截断；全文在 Path）
+	Err     string `json:"err,omitempty"`     // 预取失败原因（模型回退手动流程）
 }
 
 // P0Item 是聚合事件的子条目：正文靠前、ID 收尾，键序哲学与 Message 一致。
@@ -75,6 +92,9 @@ type DigestChat struct {
 	Cid  string `json:"cid"`
 	N    int    `json:"n"`
 	Peek string `json:"peek"`
+	// Resources 是 peek（该会话最新一条）消息的资源，flush 时已预取，
+	// 截 digestResPerChat；缺省不出现。
+	Resources []Resource `json:"resources,omitempty"`
 }
 
 type Digest struct {

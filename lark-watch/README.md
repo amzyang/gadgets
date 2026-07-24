@@ -1,7 +1,9 @@
 # lark-watch — 飞书消息监控 + 回复草稿（Claude Code skill）
 
 以你本人视角实时盯飞书：私聊、@你、音视频会议秒级升级提醒，群聊攒摘要；
-值得回的消息由 Claude 起草回复，你在终端确认或在飞书卡片上点「发送」才发出——
+消息里的云文档链接、图片、文件附件会被自动预取喂给 Claude——判断和转述
+基于真实内容，不会看着一个裸链接就说「无需处理」。值得回的消息由 Claude
+起草回复，你在终端确认或在飞书卡片上点「发送」才发出——
 **永远不会替你自动回复**。配合 [lark-persona](../lark-persona/) 的个人画像，
 草稿会贴合你平时的说话语气。
 
@@ -28,8 +30,10 @@
 2. **用户身份授权**（Device Flow，浏览器完成）：
 
    ```sh
-   lark-cli auth login --domain im,contact
+   lark-cli auth login --domain im,contact,docs
    ```
+
+   `docs` 域供资源预取读取云文档；缺它监控照常，只是文档链接退回手动获取。
 
    之后运行中若提示缺权限，按报错提示补授权即可。
 
@@ -70,7 +74,9 @@ Claude 会启动后台监控并常驻：P0 消息（私聊/@你/会议/重点人
 | `quick-replies` | 通知横幅的常用语快捷回复，每行一条，点选即回复对应消息 |
 | `reactions` | 通知横幅的表情回应，每行一个飞书 emoji_type，点选给消息贴表情 |
 
-状态存 `~/.local/state/lark-watch/lark-watch.db`（SQLite，只落本机）。
+状态存 `~/.local/state/lark-watch/lark-watch.db`（SQLite，只落本机）；预取的
+文档/图片/附件产物在 `~/.local/state/lark-watch/prefetch/`（7 天自动清扫，
+`LW_PREFETCH=0` 可整体关闭预取）。
 
 ## 已知限制
 

@@ -48,6 +48,9 @@ func notifyGraceSecs() int64 { return int64(envInt("LW_NOTIFY_GRACE", 180)) }
 // restrictedReprobe 是防泄密群标记的重探间隔秒数（群可能事后关闭防泄密模式）。
 func restrictedReprobe() int64 { return int64(envInt("LW_RESTRICTED_REPROBE", 86400)) }
 
+// p0MaxResources 是单个 P0 事件携带并预取的资源上限（聚合组合并后截断）。
+func p0MaxResources() int { return envInt("LW_PREFETCH_MAX", 3) }
+
 // Poller 是实时监控循环。Out 为事件行输出（run 模式下由单写者串行化）。
 // 拉取走「chat-list 活跃降序 + 逐会话增量」（不依赖搜索索引，不漏、低延迟）；
 // messages-search 降为每 searchEveryN 个 tick 一次的兜底对账。
@@ -59,6 +62,7 @@ type Poller struct {
 	DigestWindow int64
 	DigestMax    int
 	Out          func(line []byte) // 一次 emit 的完整字节；超长事件为多行 chunk 分片（emitLines）
+	Prefetch     *Prefetcher       // 资源预取（nil = 关闭，事件只带 refs）
 
 	Now func() int64 // 测试注入；默认 time.Now
 
@@ -102,7 +106,8 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		self, p.Interval, p.DigestWindow, p.DigestMax, earlyStopK(), searchEveryN())
 
 	defer logf("poller stopped")
-	defer p.flushDigest()
+	// 关停路径传已取消 ctx：flush 跳过预取（资源标 err 原样发出），保亚秒退出
+	defer p.flushDigest(closedCtx())
 
 	fails := 0
 	for {
@@ -133,10 +138,11 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		fails = 0
 		s.MetaSetInt("heartbeat", nowEpoch)
 		p.emitPendingBacklog(nowEpoch)
+		p.sweepPrefetch(nowEpoch)
 
 		lastFlush, _ := s.MetaGetInt("last_flush")
 		if ShouldFlush(s.DigestCount(), p.DigestMax, lastFlush, nowEpoch, p.DigestWindow) {
-			p.flushDigest()
+			p.flushDigest(ctx)
 			s.MetaSetInt("last_flush", nowEpoch)
 		}
 
@@ -232,8 +238,11 @@ func (p *Poller) tick(ctx context.Context, nowEpoch int64, self string) error {
 			logf("self_last upsert failed: %v", err)
 		}
 		mergeSelfLast(selfLast, s.SelfLast(uniqueCids(p0)))
-		// 同会话聚合 + replied 注记后统一发射（音视频会议已在 collect 内即时单发）
-		for _, ev := range MarkReplied(GroupP0(p0Buf), selfLast) {
+		// 同会话聚合 + replied 注记 + 资源预取后统一发射
+		// （音视频会议已在 collect 内即时单发）
+		events := MarkReplied(GroupP0(p0Buf), selfLast)
+		p.prefetchEvents(ctx, events)
+		for _, ev := range events {
 			p.emit(ev)
 		}
 		if len(p1) > 0 {
@@ -413,17 +422,24 @@ func GroupP0(msgs []Message) []Message {
 		// 同会话可能同时来自逐会话拉取与 search 兜底，先按时间归位
 		sort.SliceStable(group, func(i, j int) bool { return group[i].T < group[j].T })
 		if len(group) == 1 {
-			out = append(out, group[0])
+			m := group[0]
+			m.Resources = capResources(m.Resources, p0MaxResources())
+			out = append(out, m)
 			continue
 		}
+		// 资源合并到事件顶层（mid 字段标明来源）：「链接一条 + @我一条」两连发时
+		// 只取代表条会漏掉链接条的文档
 		rep := group[len(group)-1]
 		rep.N = len(group)
 		rep.Msgs = make([]P0Item, 0, len(group))
+		groupsRes := make([][]Resource, 0, len(group))
 		for _, m := range group {
 			rep.Msgs = append(rep.Msgs, P0Item{
 				Text: m.Text, From: m.From, T: m.T, Type: m.Type, Mid: m.Mid, Fid: m.Fid,
 			})
+			groupsRes = append(groupsRes, m.Resources)
 		}
+		rep.Resources = mergeResources(groupsRes, p0MaxResources())
 		out = append(out, rep)
 	}
 	return out
@@ -577,7 +593,22 @@ func (p *Poller) markRestricted(ch ChatMeta, known bool, now int64) {
 	}
 }
 
-func (p *Poller) flushDigest() {
+// prefetchEvents 在发射前填充 P0 事件的资源内容。replied 事件跳过（模型安静
+// 跳过，预取纯浪费）；整批共享 prefetchBudget 预算，超预算的资源标 err。
+func (p *Poller) prefetchEvents(ctx context.Context, events []Message) {
+	if p.Prefetch == nil || len(events) == 0 {
+		return
+	}
+	bctx, cancel := context.WithTimeout(ctx, prefetchBudget())
+	defer cancel()
+	for i := range events {
+		if !events[i].Replied {
+			p.Prefetch.Fetch(bctx, events[i].Resources, p0InlineMax)
+		}
+	}
+}
+
+func (p *Poller) flushDigest(ctx context.Context) {
 	msgs, err := p.Store.DigestTake()
 	if err != nil {
 		logf("digest take failed: %v", err)
@@ -586,7 +617,39 @@ func (p *Poller) flushDigest() {
 	if len(msgs) == 0 {
 		return
 	}
-	p.emit(BuildDigest(msgs))
+	d := BuildDigest(msgs)
+	if p.Prefetch != nil {
+		// 只预取热度序前 digestPrefetchChats 个会话的 peek 资源，共享一份预算
+		bctx, cancel := context.WithTimeout(ctx, prefetchBudget())
+		for i := range d.Chats {
+			if i >= digestPrefetchChats {
+				break
+			}
+			p.Prefetch.Fetch(bctx, d.Chats[i].Resources, digestInlineMax)
+		}
+		cancel()
+	}
+	p.emit(d)
+}
+
+// sweepPrefetch 每 24h 清扫一次预取产物（meta 键控频，跨重启不重复）。
+func (p *Poller) sweepPrefetch(now int64) {
+	if p.Prefetch == nil {
+		return
+	}
+	if last, _ := p.Store.MetaGetInt("prefetch_sweep_at"); now-last < 86400 {
+		return
+	}
+	p.Store.MetaSetInt("prefetch_sweep_at", now)
+	p.Prefetch.Sweep(now)
+}
+
+// closedCtx 返回已取消的 context（关停路径的 flush 用：预取全部短路标 err，
+// 事件带 refs 立即发出）。
+func closedCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }
 
 // sleepCtx 可取消睡眠；被取消返回 ctx.Err()。
