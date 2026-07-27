@@ -18,8 +18,10 @@ P0 消息 → 模型起草（1–3 条候选）→ lark-watch send-card（pendin
   ├─ 点「发送」（多候选时「发送 ①/②/③」，回调带 idx）→ 二进制：读 pending →
   │  以所选候选 +messages-reply --as user → 删 pending → 改卡「✅ 已发送」（只留所选候选块）
   ├─ 点「忽略」→ 二进制：删 pending → 改卡「已忽略」
-  └─ 点「复制草稿」→ 二进制：bot 把全部候选逐条以纯文本私发给用户（长按/右键即可复制），
-     pending 保留、不改卡——文本消息到达本身就是反馈
+  ├─ 点「复制草稿」→ 二进制：bot 把全部候选逐条以纯文本私发给用户（长按/右键即可复制），
+  │  pending 保留、不改卡——文本消息到达本身就是反馈
+  └─ 超 LW_PENDING_TTL（默认 24h，<=0 关闭）未处理 → daemon 每小时清扫：
+     改卡「草稿已过期」→ 删 pending（改卡 best-effort，失败照删）
 模型只负责起草 + 调 send-card；点击后完全旁路。
 ```
 
@@ -114,6 +116,7 @@ P0 会议意图消息 → 模型定时段/参会人 → lark-watch send-book-car
 | consumer 反复重启 | stderr 里 consume 退出原因；`card.action.trigger` 仅允许一个 consumer，查残留进程 |
 | 改卡失败日志 | token 用尽会自动走 message_id PATCH 兜底；兜底也失败查 bot 对 `im/v1/messages` PATCH 的权限；发送本身不受影响 |
 | 卡片显示「草稿已失效」 | pending 已被处理或清理，回终端确认状态（通知弹窗「发送」发出的现在会改卡「已发送」，不再走失效） |
+| 卡片显示「草稿已过期」 | 超 `LW_PENDING_TTL`（默认 24h）未处理，daemon 已自动忽略并丢弃候选；仍需回复就让模型重新起草 |
 | 点「预约」后改「预约失败」 | `grep card.book ~/.local/state/lark-watch/events.log \| jq .` 看 reason；auth/config 类按 `/room` skill 修（room login / booking.room_list） |
 | 「预约」显示「已失效」 | book_pending 已被消费（双击第二下 / 同 mid 重发覆盖旧卡），以 `booked` 事件或 `room list --json` 为准 |
 | 点「预约」后卡片无任何反应 | daemon 可能在预订中被 SIGKILL/崩溃带走（正常 SIGTERM 会等预订收尾）：`room list --json` 核对是否已订上，已订则手动告知对方，未订让模型重发意向卡 |
