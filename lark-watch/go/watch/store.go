@@ -468,6 +468,23 @@ func (s *Store) PendingCard(mid string) (card, cardMid string, ok bool) {
 	return card, cardMid, true
 }
 
+// PendingExpired 返回 created <= before 的全部 mid（过期清扫用），created 升序。
+func (s *Store) PendingExpired(before int64) []string {
+	rows, err := s.db.Query(`SELECT mid FROM pending WHERE created <= ? ORDER BY created`, before)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var mids []string
+	for rows.Next() {
+		var mid string
+		if rows.Scan(&mid) == nil {
+			mids = append(mids, mid)
+		}
+	}
+	return mids
+}
+
 func (s *Store) PendingDelete(mid string) error {
 	_, err := s.db.Exec(`DELETE FROM pending WHERE mid = ?`, mid)
 	return err

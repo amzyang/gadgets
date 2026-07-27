@@ -120,6 +120,22 @@ func TestPendingLifecycle(t *testing.T) {
 	}
 }
 
+// PendingExpired 边界：created <= before 命中（含等值），更新的行不命中。
+func TestPendingExpired(t *testing.T) {
+	s := openTestStore(t)
+	s.PendingPut("om_a", []string{"a"}, "text", `{}`, 100)
+	s.PendingPut("om_b", []string{"b"}, "text", `{}`, 300)
+	s.PendingPut("om_c", []string{"c"}, "text", `{}`, 301)
+
+	got := s.PendingExpired(300)
+	if len(got) != 2 || got[0] != "om_a" || got[1] != "om_b" {
+		t.Fatalf("expired: %v", got)
+	}
+	if got := s.PendingExpired(50); len(got) != 0 {
+		t.Fatalf("nothing should expire: %v", got)
+	}
+}
+
 // card_mid（发卡后回填的卡片自身 message_id）读写往返；未回填读出空串，
 // 无记录 !ok。
 func TestPendingCardMid(t *testing.T) {

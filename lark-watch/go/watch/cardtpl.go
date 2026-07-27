@@ -223,6 +223,8 @@ var (
 	// （会误导草稿已发出），候选正文全保留。
 	doneQuick   = doneState{title: "已快捷回复", status: "<font color='green'>✅ 已用常用语回复</font>"}
 	doneIgnored = doneState{title: "草稿已忽略", status: "已忽略"}
+	// 文案不写死具体时长——TTL 经 LW_PENDING_TTL 可配，写死会与配置脱节。
+	doneExpired = doneState{title: "草稿已过期", status: "⏳ 长时间未处理，已自动忽略"}
 	doneStale   = doneState{title: "草稿已失效", status: "⚠️ 草稿已失效，请回终端处理"}
 	doneFailed  = doneState{title: "回复发送失败", status: "❌ 发送失败，请回终端处理"}
 )

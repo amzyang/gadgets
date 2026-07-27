@@ -48,6 +48,9 @@ func notifyGraceSecs() int64 { return int64(envInt("LW_NOTIFY_GRACE", 180)) }
 // restrictedReprobe 是防泄密群标记的重探间隔秒数（群可能事后关闭防泄密模式）。
 func restrictedReprobe() int64 { return int64(envInt("LW_RESTRICTED_REPROBE", 86400)) }
 
+// pendingTTL 是草稿卡片的过期秒数：超过后自动忽略并清掉 pending。<= 0 关闭。
+func pendingTTL() int64 { return int64(envInt("LW_PENDING_TTL", 86400)) }
+
 // p0MaxResources 是单个 P0 事件携带并预取的资源上限（聚合组合并后截断）。
 func p0MaxResources() int { return envInt("LW_PREFETCH_MAX", 3) }
 
@@ -139,6 +142,7 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 		s.MetaSetInt("heartbeat", nowEpoch)
 		p.emitPendingBacklog(nowEpoch)
 		p.sweepPrefetch(nowEpoch)
+		p.sweepPending(nowEpoch)
 
 		lastFlush, _ := s.MetaGetInt("last_flush")
 		if ShouldFlush(s.DigestCount(), p.DigestMax, lastFlush, nowEpoch, p.DigestWindow) {
@@ -667,6 +671,25 @@ func (p *Poller) sweepPrefetch(now int64) {
 	}
 	p.Store.MetaSetInt("prefetch_sweep_at", now)
 	p.Prefetch.Sweep(now)
+}
+
+// sweepPending 把超过 pendingTTL 未处理的草稿标记过期并清掉（meta 键控频，
+// 每小时一轮，跨重启不重复）。改卡 best-effort，失败照删——用户此后点旧卡片
+// 按钮走回调侧 pending 落空的 doneStale 兜底，不会误发。
+func (p *Poller) sweepPending(now int64) {
+	ttl := pendingTTL()
+	if ttl <= 0 {
+		return
+	}
+	if last, _ := p.Store.MetaGetInt("pending_sweep_at"); now-last < 3600 {
+		return
+	}
+	p.Store.MetaSetInt("pending_sweep_at", now)
+	for _, mid := range p.Store.PendingExpired(now - ttl) {
+		markCardDone(p.Store, p.CLI, mid, doneExpired, -1)
+		deletePending(p.Store, mid)
+		logf("pending expired mid=%s (ttl %ds)", mid, ttl)
+	}
 }
 
 // closedCtx 返回已取消的 context（关停路径的 flush 用：预取全部短路标 err，

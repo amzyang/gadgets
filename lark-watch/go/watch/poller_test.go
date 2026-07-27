@@ -1248,3 +1248,81 @@ func TestTickNotifyGraceZeroImmediate(t *testing.T) {
 		t.Errorf("grace=0 must not defer: %v", msgs)
 	}
 }
+
+// pendingCardJSON 是 sweepPending 测试用的最小卡片原稿（RenderDoneCard 需要
+// header/body 结构才能改标题、追状态行）。
+const pendingCardJSON = `{"schema":"2.0","header":{"title":{"tag":"plain_text","content":"待确认"}},"body":{"elements":[]}}`
+
+// sweepPending：超 TTL 的草稿改卡为「草稿已过期」并删行，未过期的原样保留。
+func TestSweepPendingExpires(t *testing.T) {
+	f := &fakeCLI{}
+	p, _ := newTestPoller(t, f, 100000)
+	s := p.Store
+	s.PendingPut("om_old", []string{"旧草稿"}, "text", pendingCardJSON, 100000-86401)
+	s.PendingSetCardMid("om_old", "om_card_old")
+	s.PendingPut("om_new", []string{"新草稿"}, "text", pendingCardJSON, 100000-100)
+	s.PendingSetCardMid("om_new", "om_card_new")
+
+	p.sweepPending(100000)
+
+	if _, _, _, ok := s.PendingGet("om_old"); ok {
+		t.Fatal("expired pending should be deleted")
+	}
+	if !f.hasCall("patch-card om_card_old") || !f.hasCall("草稿已过期") {
+		t.Errorf("expired card should be patched to done state: %v", f.calls)
+	}
+	if _, _, _, ok := s.PendingGet("om_new"); !ok {
+		t.Fatal("fresh pending should survive")
+	}
+	if f.hasCall("om_card_new") {
+		t.Errorf("fresh card must not be touched: %v", f.calls)
+	}
+}
+
+// card_mid 未回填（存量行/发卡响应缺字段）：跳过改卡，行仍要清掉。
+func TestSweepPendingNoCardMid(t *testing.T) {
+	f := &fakeCLI{}
+	p, _ := newTestPoller(t, f, 100000)
+	p.Store.PendingPut("om_nomid", []string{"草稿"}, "text", pendingCardJSON, 100)
+
+	p.sweepPending(100000)
+
+	if _, _, _, ok := p.Store.PendingGet("om_nomid"); ok {
+		t.Fatal("expired pending without card_mid should still be deleted")
+	}
+	if f.hasCall("patch-card") {
+		t.Errorf("no patch expected without card_mid: %v", f.calls)
+	}
+}
+
+// 控频：一小时窗口内只清扫一次（meta 键持久，跨重启不重复）。
+func TestSweepPendingThrottle(t *testing.T) {
+	f := &fakeCLI{}
+	p, _ := newTestPoller(t, f, 100000)
+	p.sweepPending(100000) // 空表首扫，占住控频窗口
+
+	p.Store.PendingPut("om_late", []string{"草稿"}, "text", pendingCardJSON, 100)
+	p.sweepPending(100000 + 100)
+	if _, _, _, ok := p.Store.PendingGet("om_late"); !ok {
+		t.Fatal("within throttle window, sweep must not run")
+	}
+
+	p.sweepPending(100000 + 3600)
+	if _, _, _, ok := p.Store.PendingGet("om_late"); ok {
+		t.Fatal("after throttle window, expired pending should be deleted")
+	}
+}
+
+// LW_PENDING_TTL <= 0 关闭清扫。
+func TestSweepPendingDisabled(t *testing.T) {
+	t.Setenv("LW_PENDING_TTL", "0")
+	f := &fakeCLI{}
+	p, _ := newTestPoller(t, f, 100000)
+	p.Store.PendingPut("om_keep", []string{"草稿"}, "text", pendingCardJSON, 100)
+
+	p.sweepPending(100000)
+
+	if _, _, _, ok := p.Store.PendingGet("om_keep"); !ok {
+		t.Fatal("ttl=0 must disable sweep")
+	}
+}
