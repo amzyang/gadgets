@@ -1,10 +1,7 @@
 ---
 name: lark-watch
-description: >-
-  用户视角实时监控飞书消息并生成回复草稿与洞察。当用户说"监控飞书消息"、
-  "盯一下飞书"、"帮我看飞书"、"飞书自动回复"、"lark-watch"、"watch my
-  Feishu/Lark messages"，或希望 Claude 代替自己关注飞书私聊/群聊并起草回复时使用。
-  不负责：bot 视角事件订阅（lark-event）、主动发送与消息管理（lark-im）。
+description: 用户视角实时监控飞书消息，生成回复草稿与洞察，经卡片/横幅确认后发送（仅 /lark-watch 显式启动）。
+disable-model-invocation: true
 ---
 
 # lark-watch：飞书消息监控与回复草稿
@@ -433,111 +430,38 @@ mid/msg_type/key，图片按 P0 图片命令下载后 Read，文档链接 `docs 
   洞察关联。目录缺失/为空回退内置保底（拉长本会话历史）。模板与格式说明见
   `{SKILL_DIR}/references/context-providers/`。用户说「加一个求证源/让草稿能
   查 X」时，直接替用户写一张卡进该目录。
-- `notify`：P0 系统级通知（macOS 通知中心横幅）。**零配置默认开启**：文件
-  缺失时直接用内嵌于二进制的横幅模板，60 秒无操作自动关闭（超时即忽略）。
-  内置通知硬依赖 [alerter](https://github.com/vjeantet/alerter) ≥26
-  （`brew install vjeantet/tap/alerter`；≥26 为双横线旗标语法，旧版不兼容；
-  每次弹横幅现探测 PATH，装完即生效）：未装时只响铃并在 stderr 记安装指引
-  日志（`notify` 子命令直接报错），无弹窗兜底。横幅不抢焦点，工作零打断：
-  草稿联动通知（send-card 后弹出）正文展示对方消息摘要＋候选①全文（看清要
-  发什么再按），动作下拉 =「发送」＋常用语＋表情回应（一键回复/回应，见
-  `quick-replies`/`reactions` 配置）——「发送」直接以候选①回复对方（等价
-  卡片「发送 ①」，幂等防双发，全程无需切回飞书）、**点横幅正文 = 复制并
-  跳转**（候选①置入剪贴板并进飞书，想手改后发走这条）、关闭按钮「忽略」；
-  即时/兜底通知（无草稿）动作下拉 =「复制」＋常用语＋表情、点正文 = 跳转
-  （「复制」取消息摘要，快捷动作落在批次最后一条消息上）；VC 通知「加入」
-  直接进入会议、点正文跳到会话中的会议消息；均 60 秒超时。横幅左侧图标显示
-  飞书头像（私聊 = 对方头像、
-  群聊 = 群头像，取批次首条；URL 经 SQLite 缓存 7 天，拉取失败静默回退默认
-  图标，不阻断通知）。横幅以 alerter 默认 sender「终端」
-  （com.apple.Terminal）名义投递；要有常驻按钮需在系统设置 → 通知里
-  把「终端」的样式设为「提醒」（横幅样式几秒即逝）。用户说"来消息
-  弹窗提醒我"时确认装有 alerter 即可（默认已开启）；说"别弹了/关掉通知"时
-  写入关闭哨兵（空文件同义）：
+- `notify`：P0 系统级通知（macOS 通知中心横幅）。**零配置默认开启**，硬依赖
+  [alerter](https://github.com/vjeantet/alerter) ≥26
+  （`brew install vjeantet/tap/alerter`），未装时只响铃、无弹窗兜底。横幅由
+  二进制自动弹出：需起草的 P0 等草稿卡发出（`send-card`）后联动展示——
+  **模型无需任何通知操作**；飞书前台活跃时自动抑制。用户说"来消息弹窗提醒我"
+  时确认装有 alerter 即可（默认已开启）；说"别弹了/关掉通知"时写入关闭哨兵
+  （空文件同义）：
 
   ```sh
   mkdir -p ~/.config/lark-watch && echo off > ~/.config/lark-watch/notify
   ```
 
-  文件写其他内容 = 自定义通知脚本：P0 到达时经 `sh -c` 异步执行，每 tick 的
-  P0 批次聚合为一次调用，消息经环境变量注入：`LW_TITLE` 标题（多条带条数）、
-  `LW_MESSAGE`/`LW_SUMMARY` 每条一行的聚合摘要（`发送者（群名|私聊）: 正文`）、
-  `LW_LINK` 首条 applink（点击跳转直达消息窗口）、`LW_COUNT` 条数、`LW_FROM`/
-  `LW_CHAT`/`LW_TEXT`/`LW_TYPE`/`LW_CTYPE` 取首条、`LW_ICON` 头像 URL
-  （私聊对方/群头像，取首条，可能为空）、`LW_DRAFT` 候选话术①与
-  `LW_MID` pending 键（仅草稿联动通知有值；自定义脚本可用
-  `{SKILL_DIR}/bin/lark-watch send-draft --mid "$LW_MID"` 实现自己的发送按钮）。
-  osascript 自定义脚本用 argv 传参，勿把 `$LW_*` 拼进源码——正文含引号会
-  破坏脚本甚至被注入。
-
-  响铃已内置于二进制（通知前自动响：终端 bell 优先，无 tty 回退 osascript
-  beep，SSH 会话静默），脚本里不必再加 bell。
-
-  通知与草稿联动：需要起草回复的 P0（非音视频会议）不即时弹出，而是等草稿
-  卡片发出（`send-card`）后再展示——通知到达时飞书里已有可点的确认卡片，
-  模型无需额外操作。联动通知正文带候选①全文：默认横幅「发送」一键回复、
-  点正文复制话术并进飞书，关闭/超时即忽略（发出后 pending 失效，卡片按钮
-  再点显示「已失效」，属预期）。
-  窗口内未发卡（判定 FYI 无需回复、起草超时）则在
-  `LW_NOTIFY_GRACE`（环境变量，默认 180 秒）后照常弹出兜底；音视频会议仍
-  即时通知（走专用「忽略/加入」横幅或 `notify-vc` 脚本，不经 notify 脚本），
-  `LW_NOTIFY_GRACE=0` 恢复全部即时。停机重启时过旧的待弹通知
-  自动丢弃（不弹陈旧消息）。
-
-  飞书客户端处于前台且用户活跃（输入空闲 < 2 分钟）时自动跳过响铃与通知
-  （人已在看飞书，无需再弹；锁屏/走开或探测失败时照常通知），无需配置。
-
-  手动/脚本触发一条通知用子命令：
-  `{SKILL_DIR}/bin/lark-watch notify --title <标题> --message <内容> --link <lark://…>`
-  （优先走 notify 配置脚本；未配置时回退内置横幅——动作「复制」、点正文
-  跳转 `--link`，未装 alerter 时直接报错）。横幅会阻塞到用户交互或 60 秒
-  超时，模型调用时用 `run_in_background`。
-- `notify-vc`：音视频会议（`video_chat`/`vc_meeting`）专用通知命令，覆盖 VC
-  批次的横幅样式；`notify` 仍是通知总开关（notify 为 off 时 notify-vc 不生效）。
-  环境变量与 notify 相同，仅 `LW_TITLE` 为「📞 音视频会议」（多条带条数），
-  另追加 `LW_JOIN_LINK` 直接入会深链（`lark://vc.feishu.cn/j/<会议号>`；响铃后、
-  弹横幅前查一次进行中会议（≤3 秒）按群名/发起人匹配得到，查不到时不设——
-  best-effort，响铃不受拖延，抑制时不付查询）。
-  缺失时用内置横幅（内嵌于二进制，默认无需配置；硬依赖 alerter，同 notify）：
-  「加入」open 入会深链直接进会（拿不到会议号时退化为打开消息）、点正文 open
-  首条 applink 直达会话中的会议消息，60 秒无操作自动关闭。响铃与前台抑制
-  同样适用。自定义样式才需要该文件，写自己的脚本（argv 传参防注入，同 notify）。
-- `quick-replies`：通知横幅的常用语快捷回复，每行一条（`#` 开头的整行为
-  注释，行内 `#` 属内容）。缺失时内置默认「收到」「好的，稍后回复」。横幅下拉点选即以该文本回复对应消息（独立幂等键防连点双发，也不
-  吞掉随后的正式回复；草稿场景发出后候选随之失效）。每次弹横幅现读。
-  下拉标签中 ASCII 逗号显示为中文逗号（alerter 动作列表按逗号切分）、超长
-  截断，与「发送/复制/忽略」重名的条目被剔除，`@` 开头的条目也被剔除
-  （撞 alerter 哨兵输出 `@CLOSED`/`@TIMEOUT`，会把关闭/超时误判成点选）。
-- `reactions`：通知横幅的表情回应，每行一个飞书 emoji_type（多为大写下划线，
-  如 THUMBSUP/OK/DONE/APPLAUSE/HEART/THANKS/JIAYI；也存在 Get/Yes 等混合
-  大小写 key），默认 THUMBSUP（👍），至多取 10 个。点选给对应消息加表情
-  回应，不影响草稿候选（点赞 ≠ 已回复）。
-  横幅动作总数上限 21（首键＋常用语＋表情，常用语与表情各至多 10），超出截断。
+  文件写其他内容 = 自定义通知脚本。横幅按钮与点击行为、自定义脚本环境变量
+  （`LW_TITLE`/`LW_DRAFT`/`LW_MID` 等）与防注入、草稿联动时序
+  （`LW_NOTIFY_GRACE`）、响铃与前台抑制、手动触发 `notify` 子命令，见
+  `{SKILL_DIR}/references/notify.md`。
+- `notify-vc`：音视频会议专用通知命令，覆盖 VC 批次的横幅样式（`notify` 仍是
+  总开关，off 时不生效），详见 `{SKILL_DIR}/references/notify.md`。
+- `quick-replies`：横幅常用语快捷回复，每行一条，缺失时内置「收到」
+  「好的，稍后回复」；格式细则见 `{SKILL_DIR}/references/notify.md`。
+- `reactions`：横幅表情回应，每行一个飞书 emoji_type，默认 THUMBSUP（👍），
+  至多 10 个（点赞 ≠ 已回复）；细则同上。
 
 ## 状态与排错
 
-- 状态库：`~/.local/state/lark-watch/lark-watch.db`（SQLite，`sqlite3` 可直接查；
-  表：meta/seen/handled/processed/fetched/pending/book_pending/notify_wait/
-  digest_buf/catchup_last/restricted/chat_state/avatar）。同目录 `*.imported`
-  是 bash 时代的留档，可忽略。
-- 事件诊断日志：`~/.local/state/lark-watch/events.log`（NDJSON，默认开启，路径
-  见 `status` 输出的 `event_log` 字段）。每条消息的判定（`msg.keep`/`msg.drop`
-  的 `reason`：p2p/at-me/keyword:…/ignore:…/self 等）、tick 摘要、stdout 事件
-  （`emit`，超长分片 `emit.chunked`）、通知链路（`notify.defer/flush/claim/replied/skip`，抑制与发送
-  失败带 mids：`notify.suppress`/`notify.fail`）、发卡锚点（`card.sent`/
-  `card.book_sent`，改卡完成态 `card.done` 为 debug 级）、预约执行
-  （`card.book`）、卡片动作
-  （`card.action`）、横幅动作回调（`popup.send/qreply/react`）、顶层子命令
-  失败（`cmd.error`）与全部 stderr 诊断文本都在里面。排查「这条消息为什么推了/
-  没推」按 mid grep：`grep om_xxx events.log | jq .`；审查失败面按
-  `jq 'select(.level=="ERROR")'` 过滤（notify.fail/cmd.error）。超 10MB 轮转为
-  `events.log.1`（各留一代）。`LW_EVENT_LOG=0` 关闭、`LW_EVENT_LOG_LEVEL=debug`
-  加记重复拉取、安静 tick 与本人消息丢弃（reason=self 默认不落盘）、
-  `LW_EVENT_LOG_MAX_MB` 调上限。
 - 健康检查：`{SKILL_DIR}/bin/lark-watch status`。`restricted_chats` 非空表示
   这些群开启了防泄密模式、监控无法覆盖（见「alert / Monitor 退出」的
   `kind:"restricted"`）。
+- 状态库：`~/.local/state/lark-watch/lark-watch.db`（SQLite，`sqlite3` 可直接查）。
+- 事件诊断日志：`~/.local/state/lark-watch/events.log`（NDJSON，默认开启）。
+  排查「这条消息为什么推了/没推」按 mid grep：`grep om_xxx events.log | jq .`。
+  记录类型、级别与 `LW_EVENT_LOG*` 开关、SQLite 表清单见
+  `{SKILL_DIR}/references/troubleshooting.md`。
 - 重置监控：TaskStop Monitor 后删 lark-watch.db 再重启（会重新 baseline）。
-- 重建二进制：`cd {SKILL_DIR}/go && make install`（lint + vet + test + build，
-  依赖 golangci-lint）。
-- 单元测试：`cd {SKILL_DIR}/go && go test ./...`。
+- 重建二进制：`cd {SKILL_DIR}/go && make install`；单元测试 `go test ./...`。
