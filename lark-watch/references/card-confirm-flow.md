@@ -33,21 +33,11 @@ P0 消息 → 模型起草（1–3 条候选）→ lark-watch send-card（pendin
 改卡是 best-effort：card_mid 缺失（存量 pending/发卡响应缺字段）或 PATCH 失败
 仅记日志，发送本身不受影响。
 
-## 起草命令（模板渲染/转义/pending 全部内置于二进制）
+## 起草命令细节（命令与常用 flag 以 SKILL.md「卡片确认」一节为唯一权威快照，此处只记其未展开的机制）
 
-```bash
-printf '%s' '<草稿>' | {SKILL_DIR}/bin/lark-watch send-card \
-  --mid <原消息 message_id> --draft - \
-  --original '<原消息文本>' --from '<发送者名>' \
-  --scene '<私聊|群名>' --t '<消息时间>'
-```
-
-- 必填仅 `--mid`/`--draft`；`--original/--from/--scene/--t` 为卡片展示字段，
-  可省略（空值对应片段整体省略），P0 事件里都有、建议带上。
-- `--draft` 接文件路径或 `-`（stdin），可重复给出 2–3 条候选（`-` 至多一次；
-  多候选用进程替换 `--draft <(printf '%s' '<候选>')` 免临时文件）。多候选时每条
-  候选块标注 ①②③ 并各带自己的发送按钮（callback value 含 `idx`），format 应用
-  于全部候选。
+- `--draft` 接文件路径或 `-`（stdin，`-` 至多一次）；`--original/--from/
+  --scene/--t` 空值时对应卡片片段整体省略。多候选时每条候选块标注 ①②③
+  并各带自己的发送按钮（callback value 含 `idx`）。
 - `--format text|markdown`（默认 text）随 pending 落盘：markdown 时草稿在卡片里
   按 markdown 渲染（保留围栏，开围栏前自动补空行——卡片方言要求），确认后以
   `--markdown` 走 post 富文本回复；text 时确认后以 `--text` 纯文本回复。
