@@ -227,18 +227,25 @@ func RunNotify(ctx context.Context, configDir, script string, batch []Message, i
 
 // RunNotifyVC 是音视频会议批次的专用通知：会议邀请实时性最强、「加入」是唯一
 // 有意义的动作，不走通用 notify 脚本。优先执行 notify-vc 配置脚本（每次现读，
-// 改完即生效；LW_* 环境与通用批次一致，仅标题换 vcNotifyTitle），缺失时回退
-// 内置「忽略/加入」横幅。抑制与响铃语义同 RunNotify；同步阻塞至横幅关闭，
-// 调用方需自行 go。
-func RunNotifyVC(ctx context.Context, paths Paths, batch []Message, icon string) {
+// 改完即生效；LW_* 环境与通用批次一致，仅标题换 vcNotifyTitle，入会深链非空
+// 时追加 LW_JOIN_LINK），缺失时回退内置「忽略/加入」横幅。join 惰性解析直接
+// 入会深链（一次 lark-cli exec）：置于响铃与抑制判定之后，铃声不被查询拖慢、
+// 抑制时不付查询，横幅晚于铃声至多一个查询超时；返回空串时横幅退化为打开
+// 消息。抑制与响铃语义同 RunNotify；同步阻塞至横幅关闭，调用方需自行 go。
+func RunNotifyVC(ctx context.Context, paths Paths, batch []Message, icon string, join func() string) {
 	if !notifyGate(ctx, mids(batch)) {
 		return
 	}
+	j := join()
 	var err error
 	if script := ReadNotifyScript(filepath.Join(paths.ConfigDir, "notify-vc")); script != "" {
-		err = runNotifyScript(ctx, script, batchNotifyEnv(vcNotifyTitle, batch, icon)...)
+		env := batchNotifyEnv(vcNotifyTitle, batch, icon)
+		if j != "" {
+			env = append(env, "LW_JOIN_LINK="+j)
+		}
+		err = runNotifyScript(ctx, script, env...)
 	} else {
-		err = vcDialogFn(ctx, batchTitle(vcNotifyTitle, len(batch)), batchSummary(batch), batch[0].Link, icon)
+		err = vcDialogFn(ctx, batchTitle(vcNotifyTitle, len(batch)), batchSummary(batch), batch[0].Link, j, icon)
 	}
 	if err != nil && ctx.Err() == nil {
 		logf("vc notify failed: %v", err)
@@ -363,8 +370,9 @@ func runNotifyScript(ctx context.Context, script string, env ...string) error {
 // 把「终端」样式设为「提醒」。
 // alerterIconFlag 条件性生成 --app-icon 旗标引用（横幅左侧图标 = 飞书头像，
 // alerter 自行下载 URL，坏 URL 不影响横幅投递）：icon 为空返回空串——
-// --app-icon "" 行为未定义，不得带空旗标。n 是 icon 的位置参数索引；icon 值
-// 恒占 args 末位，布局不随空非空变化，仅旗标条件生成。
+// --app-icon "" 行为未定义，不得带空旗标。n 是 icon 的位置参数索引，由调用方
+// 的 args 布局给定（不必居末位，如 VC 横幅 icon $5 后还有入会 link $6）；
+// icon 空非空不改变 args 布局，仅旗标条件生成。
 func alerterIconFlag(icon string, n int) string {
 	if icon == "" {
 		return ""
@@ -382,12 +390,14 @@ case "$out" in
 esac`
 }
 
-// alerterVCScript VC 横幅：「加入」或点正文 = open 首条 applink 入会。
-// $1 alerter $2 标题 $3 正文 $4 link $5 icon
+// alerterVCScript VC 横幅：「加入」= open 入会深链直接进会（$6 空串时退化为
+// 消息 applink，即与点正文同路）；点正文 = open 消息 applink 直达会话中的
+// 会议消息。$1 alerter $2 标题 $3 正文 $4 消息 link $5 icon $6 入会 link
 func alerterVCScript(icon string) string {
 	return `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd` + alerterIconFlag(icon, 5) + `) || exit $?
 case "$out" in
-"加入"|"@CONTENTCLICKED") open "$4" ;;
+"加入") open "${6:-$4}" ;;
+"@CONTENTCLICKED") open "$4" ;;
 esac`
 }
 
@@ -483,12 +493,12 @@ func alerterGenericArgs(configDir, title, message, link, mid, icon string) (scri
 }
 
 // alerterVCArgs 组装音视频会议横幅的 alerter 调用；未安装时 ok=false。
-func alerterVCArgs(title, message, link, icon string) (script string, args []string, ok bool) {
+func alerterVCArgs(title, message, link, join, icon string) (script string, args []string, ok bool) {
 	ap := lookAlerter()
 	if ap == "" {
 		return "", nil, false
 	}
-	return alerterVCScript(icon), []string{ap, title, message, link, icon}, true
+	return alerterVCScript(icon), []string{ap, title, message, link, icon, join}, true
 }
 
 // runShellCmd 以 sh -c 执行内置 shell 片段并阻塞至退出；值经位置参数传入
@@ -555,11 +565,12 @@ func draftBody(message, draft string) string {
 }
 
 // builtinNotifyVC 内置音视频会议横幅（未配置 notify-vc 时的回退，响铃在调用方）：
-// 「加入」或点正文 open 首条 applink 直达会话中的会议消息；60 秒无操作自动
-// 关闭，防横幅进程堆积。VC 消息的 link 来自 message_app_link 恒有值，不设
-// 无 link 分支。硬依赖 alerter，未装返回安装指引错误。
-func builtinNotifyVC(ctx context.Context, title, message, link, icon string) error {
-	script, args, ok := alerterVCArgs(title, message, link, icon)
+// 「加入」open 入会深链直接进会（join 空串退化为消息 applink），点正文 open
+// 首条 applink 直达会话中的会议消息；60 秒无操作自动关闭，防横幅进程堆积。
+// VC 消息的 link 来自 message_app_link 恒有值，不设无 link 分支。硬依赖
+// alerter，未装返回安装指引错误。
+func builtinNotifyVC(ctx context.Context, title, message, link, join, icon string) error {
+	script, args, ok := alerterVCArgs(title, message, link, join, icon)
 	if !ok {
 		return errAlerterMissing
 	}

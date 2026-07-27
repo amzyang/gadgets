@@ -28,6 +28,8 @@ type LarkCLI interface {
 	UpdateCard(token, cardJSON string) error
 	PatchCard(cardMid, cardJSON string) error
 	EventConsumeCmd(ctx context.Context) *exec.Cmd
+	// ActiveMeetings 返回当前用户可见的进行中会议（被邀请未入会也在列）。
+	ActiveMeetings(ctx context.Context) ([]ActiveMeeting, error)
 	// DocsFetch 拉取云文档 Markdown 正文（预取链路；ref 为 URL 或 token）。
 	DocsFetch(ctx context.Context, ref string) ([]byte, error)
 	// ResourceDownload 下载消息资源（图片/文件）到 destDir，返回实际文件名。
@@ -102,6 +104,10 @@ func (c *ExecLarkCLI) runCtx(ctx context.Context, dir string, args ...string) (o
 	start := time.Now()
 	defer func() { logCmd(c.bin(), args, time.Since(start), len(out), err) }()
 	cmd := exec.CommandContext(ctx, c.bin(), args...)
+	// stdout/stderr 是 Buffer 而非 *os.File，exec 走管道：ctx 取消只杀直接
+	// 子进程，node 的孙进程若还持有管道写端，Wait 会等到管道 EOF——WaitDelay
+	// 兜底强制收尾，保证 ctx 超时（如 join 查询的 3s）真正封顶。
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -354,6 +360,30 @@ func (c *ExecLarkCLI) PatchCard(cardMid, cardJSON string) error {
 // 进程监督在 run.go）。
 func (c *ExecLarkCLI) EventConsumeCmd(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, c.bin(), "event", "consume", "card.action.trigger", "--as", "bot")
+}
+
+// ActiveMeetings 查询当前对用户 active 的进行中会议（user_active_meeting，
+// user 身份即可；本人未入会时也返回所在会话正在进行的会议——VC 横幅「加入」
+// 直接入会的会议号来源）。
+func (c *ExecLarkCLI) ActiveMeetings(ctx context.Context) ([]ActiveMeeting, error) {
+	out, err := c.runCtx(ctx, "", "vc", "+meeting-list-active", "--as", "user", "--format", "json")
+	if err != nil {
+		return nil, err
+	}
+	return parseActiveMeetings(out)
+}
+
+// parseActiveMeetings 从 user_active_meeting 响应提取 data.meetings。
+func parseActiveMeetings(out []byte) ([]ActiveMeeting, error) {
+	var env struct {
+		Data struct {
+			Meetings []ActiveMeeting `json:"meetings"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		return nil, err
+	}
+	return env.Data.Meetings, nil
 }
 
 // DocsFetch 拉取云文档 Markdown 正文（docx/wiki URL 或 token 均可）。

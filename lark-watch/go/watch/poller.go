@@ -492,7 +492,9 @@ func (p *Poller) dispatchNotify(ctx context.Context, script string, batch []Mess
 	}
 	if len(vc) > 0 {
 		evlog.Info("notify.vc", "n", len(vc), "mids", mids(vc))
-		p.goNotify(func() { RunNotifyVC(ctx, p.Paths, vc, p.resolveIcon(vc)) })
+		p.goNotify(func() {
+			RunNotifyVC(ctx, p.Paths, vc, p.resolveIcon(vc), func() string { return p.resolveJoinLink(ctx, vc) })
+		})
 	}
 	if len(rest) == 0 {
 		return
@@ -533,6 +535,29 @@ func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 // exec，不得阻塞轮询主循环——调用点均在 goNotify 闭包内）。
 func (p *Poller) resolveIcon(batch []Message) string {
 	return (&avatarResolver{CLI: p.CLI, Store: p.Store, Now: p.Now}).Resolve(batch)
+}
+
+// resolveJoinLinkTimeout 是进行中会议查询的超时上限：查询只为横幅锦上添花，
+// 封顶它对 VC 横幅出现时刻的拖延（响铃不受影响——查询经 RunNotifyVC 的
+// join 惰性求值排在铃声之后）。
+const resolveJoinLinkTimeout = 3 * time.Second
+
+// resolveJoinLink 在通知 goroutine 内查进行中会议并匹配直接入会深链（一次
+// lark-cli exec，无缓存、每 VC 批次必付；调用点在 goNotify 闭包内经
+// RunNotifyVC 惰性求值）。失败/超时/无匹配返回空串，横幅「加入」退化为
+// 打开消息——best-effort，绝不因此不弹横幅，代价是横幅比铃声晚至多一个
+// 超时窗口。
+func (p *Poller) resolveJoinLink(ctx context.Context, batch []Message) string {
+	qctx, cancel := context.WithTimeout(ctx, resolveJoinLinkTimeout)
+	defer cancel()
+	ms, err := p.CLI.ActiveMeetings(qctx)
+	if err != nil {
+		if ctx.Err() == nil { // 关停取消不入档，与其余通知路径同约定
+			logf("active meetings lookup failed: %v", err)
+		}
+		return ""
+	}
+	return matchJoinLink(batch, ms)
 }
 
 // mergeSelfLast 把单批提取结果并入 tick 级累积（保留每会话最大时间）。

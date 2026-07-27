@@ -49,12 +49,12 @@ func stubProbes(t *testing.T, bundleID string, idleSecs float64) {
 
 // stubVCDialog 注入内置 VC 弹窗替身并以 channel 记录调用参数
 // （poller 侧经 go 异步调用，channel 才能安全跨 goroutine 断言）。
-func stubVCDialog(t *testing.T) chan [4]string {
+func stubVCDialog(t *testing.T) chan [5]string {
 	t.Helper()
-	calls := make(chan [4]string, 4)
+	calls := make(chan [5]string, 4)
 	old := vcDialogFn
-	vcDialogFn = func(_ context.Context, title, message, link, icon string) error {
-		calls <- [4]string{title, message, link, icon}
+	vcDialogFn = func(_ context.Context, title, message, link, join, icon string) error {
+		calls <- [5]string{title, message, link, join, icon}
 		return nil
 	}
 	t.Cleanup(func() { vcDialogFn = old })
@@ -62,14 +62,14 @@ func stubVCDialog(t *testing.T) chan [4]string {
 }
 
 // waitForDialog 等待弹窗替身被调用（RunNotifyVC 可能在 goroutine 里跑）。
-func waitForDialog(t *testing.T, calls chan [4]string) [4]string {
+func waitForDialog(t *testing.T, calls chan [5]string) [5]string {
 	t.Helper()
 	select {
 	case got := <-calls:
 		return got
 	case <-time.After(2 * time.Second):
 		t.Fatal("vc dialog not shown")
-		return [4]string{}
+		return [5]string{}
 	}
 }
 
@@ -168,9 +168,9 @@ func TestNotifyFailEvents(t *testing.T) {
 	t.Run("vc 内置横幅失败", func(t *testing.T) {
 		logs := captureEvlog(t)
 		old := vcDialogFn
-		vcDialogFn = func(context.Context, string, string, string, string) error { return errors.New("boom") }
+		vcDialogFn = func(context.Context, string, string, string, string, string) error { return errors.New("boom") }
 		t.Cleanup(func() { vcDialogFn = old })
-		RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, batch, "")
+		RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, batch, "", func() string { return "" })
 		recs := findLogs(logs(), "notify.fail")
 		if len(recs) != 1 || recs[0]["kind"] != "vc" || recs[0]["level"] != "ERROR" {
 			t.Fatalf("notify.fail vc: %v", recs)
@@ -238,23 +238,26 @@ func TestRunNotify(t *testing.T) {
 	}
 }
 
-// 未配置 notify-vc 时走内置弹窗：标题（多条带条数）、每条一行摘要、link 取首条。
+// 未配置 notify-vc 时走内置弹窗：标题（多条带条数）、每条一行摘要、link 取
+// 首条、join 原样透传（拿不到时空串）。
 func TestRunNotifyVCBuiltin(t *testing.T) {
 	link1 := "lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"
 	link2 := "lark://applink.feishu.cn/client/chat/open?openChatId=oc_a&position=9"
+	join := "lark://vc.feishu.cn/j/424223711"
 	cases := []struct {
 		name  string
 		batch []Message
-		want  [4]string
+		join  string
+		want  [5]string
 	}{
 		{"单条", []Message{
 			{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: link1},
-		}, [4]string{"📞 音视频会议", "李四（私聊）: 发起了音视频会议", link1, "https://cdn/u.png"}},
-		{"多条", []Message{
+		}, join, [5]string{"📞 音视频会议", "李四（私聊）: 发起了音视频会议", link1, join, "https://cdn/u.png"}},
+		{"多条无入会链接", []Message{
 			{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: link1},
 			{From: strPtr("张三"), Chat: strPtr("测试群"), Ctype: "group", Type: "vc_meeting", Link: link2},
-		}, [4]string{"📞 音视频会议（2 条）",
-			"李四（私聊）: 发起了音视频会议\n张三（测试群）: 发起了音视频会议", link1, "https://cdn/u.png"}},
+		}, "", [5]string{"📞 音视频会议（2 条）",
+			"李四（私聊）: 发起了音视频会议\n张三（测试群）: 发起了音视频会议", link1, "", "https://cdn/u.png"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -262,7 +265,8 @@ func TestRunNotifyVCBuiltin(t *testing.T) {
 			stubProbes(t, "net.kovidgoyal.kitty", 0)
 			calls := stubVCDialog(t)
 
-			RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, c.batch, "https://cdn/u.png")
+			RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, c.batch, "https://cdn/u.png",
+				func() string { return c.join })
 
 			if got := waitForDialog(t, calls); got != c.want {
 				t.Errorf("dialog args:\n got %q\nwant %q", got, c.want)
@@ -274,7 +278,8 @@ func TestRunNotifyVCBuiltin(t *testing.T) {
 	}
 }
 
-// notify-vc 配置脚本覆盖内置弹窗：LW_* 环境同通用批次，仅标题换音视频会议。
+// notify-vc 配置脚本覆盖内置弹窗：LW_* 环境同通用批次，仅标题换音视频会议、
+// 追加 LW_JOIN_LINK（入会深链，拿不到时不设）。
 func TestRunNotifyVCScript(t *testing.T) {
 	rang := stubBell(t)
 	stubProbes(t, "net.kovidgoyal.kitty", 0)
@@ -283,12 +288,12 @@ func TestRunNotifyVCScript(t *testing.T) {
 	out := filepath.Join(dir, "out")
 	t.Setenv("LW_TEST_OUT", out)
 	writeConfig(t, dir, "notify-vc",
-		`printf '%s|%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_TYPE" "$LW_LINK" "$LW_MESSAGE" "$LW_ICON" > "$LW_TEST_OUT"`)
+		`printf '%s|%s|%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_COUNT" "$LW_TYPE" "$LW_LINK" "$LW_MESSAGE" "$LW_ICON" "$LW_JOIN_LINK" > "$LW_TEST_OUT"`)
 
 	RunNotifyVC(context.Background(), Paths{ConfigDir: dir}, []Message{
 		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat",
 			Link: "lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5"},
-	}, "https://cdn/u.png")
+	}, "https://cdn/u.png", func() string { return "lark://vc.feishu.cn/j/424223711" })
 
 	b, err := os.ReadFile(out)
 	if err != nil {
@@ -296,7 +301,7 @@ func TestRunNotifyVCScript(t *testing.T) {
 	}
 	want := "📞 音视频会议|1|video_chat|" +
 		"lark://applink.feishu.cn/client/chat/open?openChatId=oc_p2p1&position=5|" +
-		"李四（私聊）: 发起了音视频会议|https://cdn/u.png"
+		"李四（私聊）: 发起了音视频会议|https://cdn/u.png|lark://vc.feishu.cn/j/424223711"
 	if string(b) != want {
 		t.Errorf("got %q, want %q", b, want)
 	}
@@ -308,21 +313,26 @@ func TestRunNotifyVCScript(t *testing.T) {
 	}
 }
 
-// 前台抑制对 VC 同样生效：不响铃、不弹窗。
+// 前台抑制对 VC 同样生效：不响铃、不弹窗，入会深链查询也不付（join 惰性
+// 求值在抑制判定之后）。
 func TestRunNotifyVCSuppressed(t *testing.T) {
 	rang := stubBell(t)
 	stubProbes(t, "com.electron.lark", 3)
 	calls := stubVCDialog(t)
 
+	joined := false
 	RunNotifyVC(context.Background(), Paths{ConfigDir: t.TempDir()}, []Message{
 		{From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: "lark://x"},
-	}, "")
+	}, "", func() string { joined = true; return "" })
 
 	if len(calls) != 0 {
 		t.Error("dialog shown, want suppressed")
 	}
 	if rang.Load() != 0 {
 		t.Errorf("bell rang %d times, want 0", rang.Load())
+	}
+	if joined {
+		t.Error("join link resolved despite suppression, want lazy skip")
 	}
 }
 
@@ -386,7 +396,8 @@ func TestAlerterDraftArgs(t *testing.T) {
 }
 
 // alerter 通用/VC 横幅：有 mid 带快捷动作、无 mid 退回 plain 版（失败提示等
-// 无消息上下文场景）；复制内容为通知正文；VC 点正文或「加入」即入会。
+// 无消息上下文场景）；复制内容为通知正文；VC「加入」直接入会（缺深链退化为
+// 打开消息）、点正文跳到会话中的会议消息。
 func TestAlerterGenericVCArgs(t *testing.T) {
 	stubAlerter(t, "/opt/bin/alerter")
 	dir := t.TempDir()
@@ -419,12 +430,18 @@ func TestAlerterGenericVCArgs(t *testing.T) {
 		}
 	}
 
-	script, args, ok = alerterVCArgs("t", "msg", "lark://vc", "https://cdn/g.jpg")
-	if !ok || !strings.Contains(script, `"加入"|"@CONTENTCLICKED"`) || args[3] != "lark://vc" || args[4] != "https://cdn/g.jpg" {
+	script, args, ok = alerterVCArgs("t", "msg", "lark://vc", "lark://vc.feishu.cn/j/424223711", "https://cdn/g.jpg")
+	if !ok || args[3] != "lark://vc" || args[4] != "https://cdn/g.jpg" || args[5] != "lark://vc.feishu.cn/j/424223711" {
 		t.Errorf("vc: ok=%v args=%v", ok, args)
 	}
-	if want := `out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd --app-icon "$5") || exit $?`; !strings.Contains(script, want) {
-		t.Errorf("vc script missing %q:\n%s", want, script)
+	for _, want := range []string{
+		`out=$("$1" --title "$2" --message "$3" --actions "加入" --close-label "忽略" --timeout 60 --ignore-dnd --app-icon "$5") || exit $?`,
+		`"加入") open "${6:-$4}" ;;`,
+		`"@CONTENTCLICKED") open "$4" ;;`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("vc script missing %q:\n%s", want, script)
+		}
 	}
 }
 
@@ -479,7 +496,7 @@ func TestBuiltinNotifyNoAlerter(t *testing.T) {
 	stubAlerter(t, "")
 	for name, err := range map[string]error{
 		"generic": builtinNotify(context.Background(), t.TempDir(), "t", "m", "lark://x", "", ""),
-		"vc":      builtinNotifyVC(context.Background(), "t", "m", "lark://x", ""),
+		"vc":      builtinNotifyVC(context.Background(), "t", "m", "lark://x", "", ""),
 	} {
 		if err == nil || !strings.Contains(err.Error(), "alerter") {
 			t.Errorf("%s: want alerter-missing error, got %v", name, err)

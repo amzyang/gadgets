@@ -8,27 +8,34 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
 const emptyMessagesResp = `{"ok":true,"data":{"messages":[],"has_more":false}}`
 
-// fakeCLI 记录调用并可注入失败（替代 bash 测试的 PATH shim）。
+// fakeCLI 记录调用并可注入失败（替代 bash 测试的 PATH shim）。record/hasCall
+// 加锁：resolveIcon/resolveJoinLink 在通知 goroutine 内调 CLI，与主测试线程
+// 并发触碰 calls。
 type fakeCLI struct {
-	calls         []string
-	failReply     bool
-	failUpdate    bool
-	failPatch     bool
-	failAvatar    bool
-	failDownload  bool
-	onReply       func() // ReplyAsUser 后置钩子：在命令中途注错（如关库）用
-	chatAvatarURL string
-	userAvatarURL string
-	docsFetch     func(ctx context.Context, ref string) ([]byte, error) // DocsFetch 注入；nil = 默认成功响应
-	downloadName  string                                                // ResourceDownload 写入 destDir 的文件名；空 = "res.png"
+	mu             sync.Mutex
+	calls          []string
+	failReply      bool
+	failUpdate     bool
+	failPatch      bool
+	failAvatar     bool
+	failDownload   bool
+	onReply        func() // ReplyAsUser 后置钩子：在命令中途注错（如关库）用
+	chatAvatarURL  string
+	userAvatarURL  string
+	docsFetch      func(ctx context.Context, ref string) ([]byte, error) // DocsFetch 注入；nil = 默认成功响应
+	downloadName   string                                                // ResourceDownload 写入 destDir 的文件名；空 = "res.png"
+	activeMeetings []ActiveMeeting                                       // ActiveMeetings 注入；nil = 无进行中会议
 }
 
 func (f *fakeCLI) record(format string, args ...any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, fmt.Sprintf(format, args...))
 }
 func (f *fakeCLI) AuthSelf() (AuthInfo, error) { return AuthInfo{OpenID: "ou_SELF"}, nil }
@@ -101,6 +108,11 @@ func (f *fakeCLI) PatchCard(cardMid, cardJSON string) error {
 	return nil
 }
 
+func (f *fakeCLI) ActiveMeetings(context.Context) ([]ActiveMeeting, error) {
+	f.record("active-meetings")
+	return f.activeMeetings, nil
+}
+
 func (f *fakeCLI) DocsFetch(ctx context.Context, ref string) ([]byte, error) {
 	f.record("docs-fetch %s", ref)
 	if f.docsFetch != nil {
@@ -125,6 +137,8 @@ func (f *fakeCLI) ResourceDownload(ctx context.Context, mid, key, rtype, destDir
 }
 
 func (f *fakeCLI) hasCall(substr string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, c := range f.calls {
 		if strings.Contains(c, substr) {
 			return true
