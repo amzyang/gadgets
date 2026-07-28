@@ -978,22 +978,42 @@ func TestDispatchNotifyGraceZeroSplits(t *testing.T) {
 	}
 }
 
-// VC 横幅带直接入会深链：dispatchNotify 在通知 goroutine 内查进行中会议并
-// 匹配；查不到（fake 默认无会议）时传空串，横幅退化为打开消息。
+// VC 横幅带直接入会深链：dispatchNotify 在通知 goroutine 内拉批次首条消息
+// 原文取 meet_number（只取首条，指向与横幅锚定一致）；拿不到（无会议号/
+// 查询失败）时传空串，横幅退化为打开消息。
 func TestDispatchNotifyVCJoinLink(t *testing.T) {
-	stubBell(t)
-	stubProbes(t, "net.kovidgoyal.kitty", 0)
-	calls := stubVCDialog(t)
-	f := &listFake{}
-	f.activeMeetings = []ActiveMeeting{{No: "424223711", Title: "测试群的视频会议"}}
-	p, _ := newTestPoller(t, f, 2000)
+	cases := []struct {
+		name    string
+		content string
+		fail    bool
+		join    string
+	}{
+		{"content 带会议号", `{"topic":"测试群的视频会议","meet_number":"424223711","start_time":"1"}`, false,
+			"lark://vc.feishu.cn/j/424223711"},
+		{"content 无会议号退化", `{"text":"在吗"}`, false, ""},
+		{"查询失败退化", "", true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stubBell(t)
+			stubProbes(t, "net.kovidgoyal.kitty", 0)
+			calls := stubVCDialog(t)
+			f := &listFake{fakeCLI: fakeCLI{msgContent: c.content, failMsgContent: c.fail}}
+			p, _ := newTestPoller(t, f, 2000)
 
-	p.dispatchNotify(context.Background(), "", []Message{
-		{From: strPtr("张三"), Chat: strPtr("测试群"), Ctype: "group", Type: "vc_meeting", Link: "lark://vc"},
-	}, 2000)
+			p.dispatchNotify(context.Background(), "", []Message{
+				{Mid: "om_vc1", From: strPtr("张三"), Chat: strPtr("测试群"), Ctype: "group", Type: "vc_meeting", Link: "lark://vc"},
+				{Mid: "om_vc2", From: strPtr("李四"), Ctype: "p2p", Type: "video_chat", Link: "lark://vc2"},
+			}, 2000)
 
-	if got := waitForDialog(t, calls); got[2] != "lark://vc" || got[3] != "lark://vc.feishu.cn/j/424223711" {
-		t.Errorf("vc dialog links: got %v", got)
+			if got := waitForDialog(t, calls); got[2] != "lark://vc" || got[3] != c.join {
+				t.Errorf("vc dialog links: got %v, want join %q", got, c.join)
+			}
+			p.notifyWG.Wait()
+			if !f.hasCall("message-content om_vc1") || f.hasCall("message-content om_vc2") {
+				t.Errorf("应只取批次首条消息原文: %v", f.calls)
+			}
+		})
 	}
 }
 

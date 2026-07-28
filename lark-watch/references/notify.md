@@ -90,9 +90,9 @@ SSH 会话静默），脚本里不必再加 bell。
 音视频会议（`video_chat`/`vc_meeting`）专用通知命令，覆盖 VC 批次的横幅样式；
 `notify` 仍是通知总开关（notify 为 off 时 notify-vc 不生效）。环境变量与 notify
 相同，仅 `LW_TITLE` 为「📞 音视频会议」（多条带条数），另追加 `LW_JOIN_LINK`
-直接入会深链（`lark://vc.feishu.cn/j/<会议号>`；响铃后、弹横幅前查一次进行中
-会议（≤3 秒）按群名/发起人匹配得到，查不到时不设——best-effort，响铃不受
-拖延，抑制时不付查询）。
+直接入会深链（`lark://vc.feishu.cn/j/<会议号>`；响铃后、弹横幅前拉一次批次
+首条消息原文（≤3 秒）取 content 自带的 meet_number 得到，拿不到时不设——
+best-effort，响铃不受拖延，抑制时不付查询）。
 
 缺失时用内置横幅（内嵌于二进制，默认无需配置；硬依赖 alerter，同 notify）：
 「加入」open 入会深链直接进会（拿不到会议号时退化为打开消息）、点正文 open

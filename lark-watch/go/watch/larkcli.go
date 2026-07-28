@@ -28,8 +28,9 @@ type LarkCLI interface {
 	UpdateCard(token, cardJSON string) error
 	PatchCard(cardMid, cardJSON string) error
 	EventConsumeCmd(ctx context.Context) *exec.Cmd
-	// ActiveMeetings 返回当前用户可见的进行中会议（被邀请未入会也在列）。
-	ActiveMeetings(ctx context.Context) ([]ActiveMeeting, error)
+	// MessageContent 拉取单条消息的原始 body.content（VC 横幅「加入」的
+	// 会议号来源：video_chat 消息 content 自带 meet_number）。
+	MessageContent(ctx context.Context, mid string) (string, error)
 	// DocsFetch 拉取云文档 Markdown 正文（预取链路；ref 为 URL 或 token）。
 	DocsFetch(ctx context.Context, ref string) ([]byte, error)
 	// ResourceDownload 下载消息资源（图片/文件）到 destDir，返回实际文件名。
@@ -362,28 +363,36 @@ func (c *ExecLarkCLI) EventConsumeCmd(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, c.bin(), "event", "consume", "card.action.trigger", "--as", "bot")
 }
 
-// ActiveMeetings 查询当前对用户 active 的进行中会议（user_active_meeting，
-// user 身份即可；本人未入会时也返回所在会话正在进行的会议——VC 横幅「加入」
-// 直接入会的会议号来源）。
-func (c *ExecLarkCLI) ActiveMeetings(ctx context.Context) ([]ActiveMeeting, error) {
-	out, err := c.runCtx(ctx, "", "vc", "+meeting-list-active", "--as", "user", "--format", "json")
+// MessageContent 拉取单条消息的原始 body.content。渲染后的管线消息
+// （Message.Text）会把 video_chat 压成 "[Video call]"，会议号只存在于
+// 原文，故按 mid 单独拉一次。
+func (c *ExecLarkCLI) MessageContent(ctx context.Context, mid string) (string, error) {
+	out, err := c.runCtx(ctx, "", "api", "GET", "/open-apis/im/v1/messages/"+mid, "--as", "user")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return parseActiveMeetings(out)
+	return parseMessageContent(out)
 }
 
-// parseActiveMeetings 从 user_active_meeting 响应提取 data.meetings。
-func parseActiveMeetings(out []byte) ([]ActiveMeeting, error) {
+// parseMessageContent 从 messages get 响应提取 data.items[0].body.content；
+// 空 items 报错（上层 logf 留痕），与「拿到 content 但无会议号」区分。
+func parseMessageContent(out []byte) (string, error) {
 	var env struct {
 		Data struct {
-			Meetings []ActiveMeeting `json:"meetings"`
+			Items []struct {
+				Body struct {
+					Content string `json:"content"`
+				} `json:"body"`
+			} `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, err
+		return "", err
 	}
-	return env.Data.Meetings, nil
+	if len(env.Data.Items) == 0 {
+		return "", fmt.Errorf("messages get: empty items")
+	}
+	return env.Data.Items[0].Body.Content, nil
 }
 
 // DocsFetch 拉取云文档 Markdown 正文（docx/wiki URL 或 token 均可）。

@@ -541,27 +541,34 @@ func (p *Poller) resolveIcon(batch []Message) string {
 	return (&avatarResolver{CLI: p.CLI, Store: p.Store, Now: p.Now}).Resolve(batch)
 }
 
-// resolveJoinLinkTimeout 是进行中会议查询的超时上限：查询只为横幅锦上添花，
+// resolveJoinLinkTimeout 是消息原文查询的超时上限：查询只为横幅锦上添花，
 // 封顶它对 VC 横幅出现时刻的拖延（响铃不受影响——查询经 RunNotifyVC 的
 // join 惰性求值排在铃声之后）。
 const resolveJoinLinkTimeout = 3 * time.Second
 
-// resolveJoinLink 在通知 goroutine 内查进行中会议并匹配直接入会深链（一次
-// lark-cli exec，无缓存、每 VC 批次必付；调用点在 goNotify 闭包内经
-// RunNotifyVC 惰性求值）。失败/超时/无匹配返回空串，横幅「加入」退化为
-// 打开消息——best-effort，绝不因此不弹横幅，代价是横幅比铃声晚至多一个
-// 超时窗口。
+// resolveJoinLink 在通知 goroutine 内拉批次首条消息原文，取 content 自带的
+// meet_number 构造直接入会深链（一次 lark-cli exec，无缓存、每 VC 批次必付；
+// 调用点在 goNotify 闭包内经 RunNotifyVC 惰性求值）。锚定批次首条：横幅
+// 标题/正文/点正文均取首条，「加入」的指向须一致，首条拿不到不遍历后续
+// （宁缺勿错）。失败/超时/无会议号返回空串并留痕，横幅「加入」退化为打开
+// 消息——best-effort，绝不因此不弹横幅，代价是横幅比铃声晚至多一个超时
+// 窗口。
 func (p *Poller) resolveJoinLink(ctx context.Context, batch []Message) string {
 	qctx, cancel := context.WithTimeout(ctx, resolveJoinLinkTimeout)
 	defer cancel()
-	ms, err := p.CLI.ActiveMeetings(qctx)
+	content, err := p.CLI.MessageContent(qctx, batch[0].Mid)
 	if err != nil {
 		if ctx.Err() == nil { // 关停取消不入档，与其余通知路径同约定
-			logf("active meetings lookup failed: %v", err)
+			logf("vc join: message content lookup failed: %v", err)
 		}
 		return ""
 	}
-	return matchJoinLink(batch, ms)
+	no := meetNumberFromContent(content)
+	if no == "" {
+		logf("vc join: no meet_number in content, mid=%s", batch[0].Mid)
+		return ""
+	}
+	return joinLink(no)
 }
 
 // mergeSelfLast 把单批提取结果并入 tick 级累积（保留每会话最大时间）。

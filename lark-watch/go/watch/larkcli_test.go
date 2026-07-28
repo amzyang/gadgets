@@ -100,6 +100,23 @@ func TestParseUserAvatar(t *testing.T) {
 	}
 }
 
+// messages get 响应提取 body.content（转义 JSON 字符串原样返回）；
+// 空 items/坏 JSON 报错——让上层 logf 留痕，与「拿到 content 但无
+// meet_number」（静默空串）区分开。
+func TestParseMessageContent(t *testing.T) {
+	full := `{"ok":true,"data":{"items":[{"body":{"content":"{\"topic\":\"x的视频会议\",\"meet_number\":\"992101084\"}"},"msg_type":"video_chat"}]}}`
+	got, err := parseMessageContent([]byte(full))
+	if err != nil || got != `{"topic":"x的视频会议","meet_number":"992101084"}` {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := parseMessageContent([]byte(`{"ok":true,"data":{"items":[]}}`)); err == nil {
+		t.Error("empty items: want error")
+	}
+	if _, err := parseMessageContent([]byte("not json")); err == nil {
+		t.Error("bad json: want error")
+	}
+}
+
 func TestReplyArgs(t *testing.T) {
 	text := strings.Join(replyArgs("om_1", "草稿", "text", "om_1"), " ")
 	if !strings.Contains(text, "--text 草稿") || strings.Contains(text, "--markdown") {

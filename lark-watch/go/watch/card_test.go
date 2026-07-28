@@ -30,7 +30,8 @@ type fakeCLI struct {
 	userAvatarURL  string
 	docsFetch      func(ctx context.Context, ref string) ([]byte, error) // DocsFetch 注入；nil = 默认成功响应
 	downloadName   string                                                // ResourceDownload 写入 destDir 的文件名；空 = "res.png"
-	activeMeetings []ActiveMeeting                                       // ActiveMeetings 注入；nil = 无进行中会议
+	msgContent     string                                                // MessageContent 注入的 body.content
+	failMsgContent bool
 }
 
 func (f *fakeCLI) record(format string, args ...any) {
@@ -108,9 +109,12 @@ func (f *fakeCLI) PatchCard(cardMid, cardJSON string) error {
 	return nil
 }
 
-func (f *fakeCLI) ActiveMeetings(context.Context) ([]ActiveMeeting, error) {
-	f.record("active-meetings")
-	return f.activeMeetings, nil
+func (f *fakeCLI) MessageContent(_ context.Context, mid string) (string, error) {
+	f.record("message-content %s", mid)
+	if f.failMsgContent {
+		return "", fmt.Errorf("api error")
+	}
+	return f.msgContent, nil
 }
 
 func (f *fakeCLI) DocsFetch(ctx context.Context, ref string) ([]byte, error) {
