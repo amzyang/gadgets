@@ -59,6 +59,12 @@
 claude /lark-watch
 ```
 
+监控会话长期挂着，转述/摘要不吃顶配模型，可指定更经济的模型与推理档位：
+
+```sh
+claude --model sonnet --effort medium '/lark-watch'
+```
+
 Claude 会启动后台监控并常驻：P0 消息（私聊/@你/会议/重点人）实时转述 + 起草回复，
 群聊每 10 分钟出摘要。离开一阵后说「补课」可以拉未读积压。
 
