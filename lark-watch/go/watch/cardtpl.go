@@ -146,16 +146,25 @@ func newCardShell(title, template, scene, from, t, original string) draftCard {
 // format=="markdown" 时草稿按 markdown 渲染（预览≈对方所见），否则包围栏展示源文。
 // drafts 为候选列表（len >= 1）：单条时布局与文案同单草稿；多条时每条标注圈号
 // （①②③…，SKILL.md 约束 1–3 条，圈号字符到 ⑳ 为止）并各带自己的发送按钮。
+// labels 为可选方向短标签（与 drafts 按位配对，CLI 入口校验全不给或等数，
+// 空串跳过该位），渲染进候选块标题括注（**草稿 ①（缓冲）**）——纯展示，
+// 不进按钮文案与回调协议（方向候选：表态门禁无据时由用户扫标签拍板，
+// 语义留在 SKILL.md 层）。
 // note 非空时在全部候选之后、共享按钮之前追加灰字「依据」状态行（表态门禁）。
-func RenderDraftCard(mid, scene, from, t, original string, drafts []string, format, note string) string {
+func RenderDraftCard(mid, scene, from, t, original string, drafts, labels []string, format, note string) string {
 	c := newCardShell("回复草稿待确认", "blue", scene, from, t, original)
 	single := len(drafts) == 1
 	for i, draft := range drafts {
-		head, label := "**草稿**", "发送"
+		title, btn := "草稿", "发送"
 		if !single {
-			head = fmt.Sprintf("**草稿 %c**", '①'+i)
-			label = fmt.Sprintf("发送 %c", '①'+i)
+			title = fmt.Sprintf("草稿 %c", '①'+i)
+			btn = fmt.Sprintf("发送 %c", '①'+i)
 		}
+		if i < len(labels) && labels[i] != "" {
+			// 标签进入加粗标记的单行语境：转义防碎裂、换行归一（正确性变换，同卡片标题）
+			title += "（" + escapeCardMarkdown(oneline(labels[i])) + "）"
+		}
+		head := "**" + title + "**"
 		draftMD := head + "\n\n" + padCardFences(draft)
 		if format != "markdown" {
 			// 代码围栏前须空行（飞书卡片 markdown 实测要求）；草稿内含围栏时降级为 '''
@@ -163,7 +172,7 @@ func RenderDraftCard(mid, scene, from, t, original string, drafts []string, form
 		}
 		c.Body.Elements = append(c.Body.Elements,
 			cardElement{Tag: "markdown", ElementID: fmt.Sprintf("draft-%d", i), Content: draftMD},
-			button(label, "primary_filled", map[string]any{"action": "send", "mid": mid, "idx": i, "h": contentHash(draft)}),
+			button(btn, "primary_filled", map[string]any{"action": "send", "mid": mid, "idx": i, "h": contentHash(draft)}),
 		)
 	}
 	if note != "" {

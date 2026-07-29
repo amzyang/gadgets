@@ -140,9 +140,16 @@ func RunIgnoreAdd(paths Paths, pattern string) error {
 // RunSendCard 起草卡片：候选草稿 pending 入库 + 渲染 Card 2.0 模板 + bot 私发给
 // 用户本人，随后释放该会话被延迟的 P0 系统通知（通知在草稿生成之后展示）。
 // draftPaths 每项为草稿文件路径或 "-"（stdin，至多一项——stdin 只可读
-// 一次）；format（text|markdown）决定回复消息类型与卡片渲染，应用于全部候选；
-// note 非空时卡片展示「依据」状态行（表态门禁场景标注求证结论）。
-func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []string, original, from, scene, t, format, note string) error {
+// 一次）；labels 为可选方向短标签，与 draftPaths 按位配对：全不给或严格等数
+// （某位不标用空串占位）。数量不符发卡即报错（对齐 ParseBookSlots 哲学）——
+// 多给指向不存在的候选，少给会静默按 0 起位错挂方向、用户扫标签点选时以错误
+// 立场发出。标签只渲染进卡片候选标题、不入 pending（发送/复制/横幅取 pending
+// 原文，天然无标签）；format（text|markdown）决定回复消息类型与卡片渲染，
+// 应用于全部候选；note 非空时卡片展示「依据」状态行（表态门禁场景标注求证结论）。
+func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths, labels []string, original, from, scene, t, format, note string) error {
+	if len(labels) != 0 && len(labels) != len(draftPaths) {
+		return fmt.Errorf("%d --label for %d --draft: label 须与 draft 等数或全不给（某位不标用 --label '' 占位）", len(labels), len(draftPaths))
+	}
 	drafts := make([]string, len(draftPaths))
 	for i, path := range draftPaths {
 		var draftBytes []byte
@@ -165,7 +172,7 @@ func RunSendCard(s *Store, cli LarkCLI, paths Paths, mid string, draftPaths []st
 	if err != nil {
 		return err
 	}
-	card := RenderDraftCard(mid, scene, from, t, original, drafts, format, note)
+	card := RenderDraftCard(mid, scene, from, t, original, drafts, labels, format, note)
 	if err := s.PendingPut(mid, drafts, format, card, time.Now().Unix()); err != nil {
 		return err
 	}

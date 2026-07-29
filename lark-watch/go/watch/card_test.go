@@ -310,7 +310,7 @@ func TestCardSendMarkdownFormat(t *testing.T) {
 func TestCardSendCandidate(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
-	card := RenderDraftCard("om_c", "私聊", "张三", "", "原消息", []string{"候选A", "候选B"}, "text", "")
+	card := RenderDraftCard("om_c", "私聊", "张三", "", "原消息", []string{"候选A", "候选B"}, nil, "text", "")
 	s.PendingPut("om_c", []string{"候选A", "候选B"}, "text", card, 1)
 
 	handleCard(s, cli, "ou_SELF", cardEventIdx("e10", "tok10", "send", "om_c", 1), 100)
@@ -348,16 +348,23 @@ func TestCardSendIdxOutOfRange(t *testing.T) {
 	}
 }
 
-// 多候选复制：bot 逐条回发全部候选（每条可单独长按复制），pending 保留、不改卡。
+// 多候选复制：bot 逐条回发全部候选（每条可单独长按复制），pending 保留、不改卡；
+// 回发取 pending 原文——方向标签只活在卡片标题里，复制文本不带括注、可直接粘贴。
 func TestCardCopyMulti(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
-	s.PendingPut("om_cm", []string{"候选甲", "候选乙"}, "text", testCardContent, 1)
+	card := RenderDraftCard("om_cm", "", "", "", "", []string{"候选甲", "候选乙"}, []string{"缓冲", "放行"}, "text", "")
+	s.PendingPut("om_cm", []string{"候选甲", "候选乙"}, "text", card, 1)
 
 	handleCard(s, cli, "ou_SELF", cardEvent("e12", "tok12", "copy", "om_cm"), 100)
 
 	if !cli.hasCall("send-text ou_SELF 候选甲") || !cli.hasCall("send-text ou_SELF 候选乙") {
 		t.Errorf("copy should send every candidate: %v", cli.calls)
+	}
+	for _, c := range cli.calls {
+		if strings.HasPrefix(c, "send-text") && strings.Contains(c, "（") {
+			t.Errorf("copy text must not carry direction label: %s", c)
+		}
 	}
 	if _, _, _, ok := s.PendingGet("om_cm"); !ok {
 		t.Error("pending should be kept after copy")
@@ -450,7 +457,7 @@ func TestHandleCardEventLogsAction(t *testing.T) {
 
 func TestRenderDraftCard(t *testing.T) {
 	card := RenderDraftCard("om_x", "私聊", "张三", "12:03",
-		`<at user_id="ou_1">周八</at> 帮我看下 *这个* <方案>`, []string{"好的，```稍后```回复"}, "text", "")
+		`<at user_id="ou_1">周八</at> 帮我看下 *这个* <方案>`, []string{"好的，```稍后```回复"}, nil, "text", "")
 
 	for _, want := range []string{
 		`"schema":"2.0"`,
@@ -477,7 +484,7 @@ func TestRenderDraftCard(t *testing.T) {
 // 多候选：每条候选块带圈号标题与自己的发送按钮（就近排列），底部共享复制/忽略。
 func TestRenderDraftCardMulti(t *testing.T) {
 	card := RenderDraftCard("om_m", "私聊", "张三", "", "原消息",
-		[]string{"先答应", "先问细节", "婉拒"}, "text", "")
+		[]string{"先答应", "先问细节", "婉拒"}, nil, "text", "")
 
 	// 元素顺序：草稿① < 发送① < 草稿② < 发送② < 草稿③ < 发送③ < 复制 < 忽略
 	var last int
@@ -509,9 +516,54 @@ func TestRenderDraftCardMulti(t *testing.T) {
 	}
 }
 
+// 方向候选标签：渲染进候选块标题括注（**草稿 ①（缓冲）**），按位配对、可少给、
+// 空串跳过；按钮文案与回调 value 不受影响（标签纯展示，不进协议）。
+func TestRenderDraftCardLabels(t *testing.T) {
+	card := RenderDraftCard("om_lb", "私聊", "张三", "", "原消息",
+		[]string{"缓冲话术", "放行话术", "拦下话术"}, []string{"缓冲", "放行", "拦下"}, "text", "")
+	var last int
+	for _, marker := range []string{"**草稿 ①（缓冲）**", "**草稿 ②（放行）**", "**草稿 ③（拦下）**"} {
+		i := strings.Index(card, marker)
+		if i < 0 {
+			t.Fatalf("card missing %q\n%s", marker, card)
+		}
+		if i < last {
+			t.Fatalf("label %q out of order\n%s", marker, card)
+		}
+		last = i
+	}
+	for _, want := range []string{
+		"发送 ①", "发送 ②", "发送 ③",
+		fmt.Sprintf(`"action":"send","h":%q,"idx":0,"mid":"om_lb"`, contentHash("缓冲话术")),
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+	// 标签进入加粗标记的单行语境：markdown 特殊字符转义、换行归一为空格
+	card = RenderDraftCard("om_lb2", "", "", "", "", []string{"甲", "乙"}, []string{"拦*下\n先"}, "text", "")
+	if !strings.Contains(card, "**草稿 ①（拦&#42;下 先）**") {
+		t.Errorf("label should be escaped and onelined\n%s", card)
+	}
+
+	// 等数配对、空串占位：空串位不渲染括注
+	card = RenderDraftCard("om_lb3", "", "", "", "", []string{"甲", "乙", "丙"}, []string{"", "放行", ""}, "text", "")
+	for _, want := range []string{"**草稿 ①**\\n", "**草稿 ②（放行）**", "**草稿 ③**\\n"} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+
+	// 单候选 + 标签：无圈号，括注照渲染
+	card = RenderDraftCard("om_lb4", "", "", "", "", []string{"唯一"}, []string{"缓冲"}, "text", "")
+	if !strings.Contains(card, "**草稿（缓冲）**") {
+		t.Errorf("single draft label missing\n%s", card)
+	}
+}
+
 // 多候选 text 格式：每条候选独立包围栏、独立降级内部围栏。
 func TestRenderDraftCardMultiText(t *testing.T) {
-	card := RenderDraftCard("om_mt", "", "", "", "", []string{"甲```x```", "乙"}, "text", "")
+	card := RenderDraftCard("om_mt", "", "", "", "", []string{"甲```x```", "乙"}, nil, "text", "")
 	for _, want := range []string{"'''x'''", "**草稿 ①**\\n\\n```\\n", "**草稿 ②**\\n\\n```\\n乙\\n```"} {
 		if !strings.Contains(card, want) {
 			t.Errorf("card missing %q\n%s", want, card)
@@ -522,7 +574,7 @@ func TestRenderDraftCardMultiText(t *testing.T) {
 // 多候选 markdown 格式：每条候选独立走围栏补空行，不降级。
 func TestRenderDraftCardMultiMarkdown(t *testing.T) {
 	card := RenderDraftCard("om_mm", "", "", "", "",
-		[]string{"看这段：\n```go\nx := 1\n```", "直接说结论"}, "markdown", "")
+		[]string{"看这段：\n```go\nx := 1\n```", "直接说结论"}, nil, "markdown", "")
 	for _, want := range []string{
 		"**草稿 ①**\\n\\n看这段：\\n\\n```go\\nx := 1\\n```",
 		"**草稿 ②**\\n\\n直接说结论",
@@ -538,7 +590,7 @@ func TestRenderDraftCardMultiMarkdown(t *testing.T) {
 
 // markdown 草稿：直接按 markdown 渲染（不包围栏、不降级 ```），围栏前补空行。
 func TestRenderDraftCardMarkdown(t *testing.T) {
-	card := RenderDraftCard("om_md", "", "", "", "", []string{"看这段：\n```go\nx := 1\n```\n跑一下"}, "markdown", "")
+	card := RenderDraftCard("om_md", "", "", "", "", []string{"看这段：\n```go\nx := 1\n```\n跑一下"}, nil, "markdown", "")
 
 	for _, want := range []string{
 		"**草稿**\\n\\n看这段：\\n\\n```go\\nx := 1\\n```\\n跑一下", // 卡片方言：围栏前补空行
@@ -569,7 +621,7 @@ func TestPadCardFences(t *testing.T) {
 
 // 最小参数（仅 mid+draft）：展示片段整体省略，不渲染空标题/空引用。
 func TestRenderDraftCardMinimal(t *testing.T) {
-	card := RenderDraftCard("om_min", "", "", "", "", []string{"只有草稿"}, "text", "")
+	card := RenderDraftCard("om_min", "", "", "", "", []string{"只有草稿"}, nil, "text", "")
 
 	for _, want := range []string{
 		`"schema":"2.0"`,
@@ -608,7 +660,7 @@ func TestRenderDoneCard(t *testing.T) {
 // element_id 的块（含旧版本卡片全部块）不受过滤影响。
 func TestRenderDoneCardKeepsChosen(t *testing.T) {
 	draft := RenderDraftCard("om_k", "私聊", "张三", "", "原始消息",
-		[]string{"候选甲", "候选乙", "候选丙"}, "text", "")
+		[]string{"候选甲", "候选乙", "候选丙"}, nil, "text", "")
 
 	got, err := RenderDoneCard(draft, doneSent, 1)
 	if err != nil {
@@ -637,11 +689,31 @@ func TestRenderDoneCardKeepsChosen(t *testing.T) {
 	}
 }
 
+// 发送成功的带标签多候选卡：标签活在候选块 content 里，随所选块一起保留，
+// 其余候选连同标签剔除（标签不持久化的行为契约——完成态吃发卡时落盘原稿）。
+func TestRenderDoneCardKeepsChosenLabel(t *testing.T) {
+	draft := RenderDraftCard("om_kl", "私聊", "张三", "", "原消息",
+		[]string{"缓冲话术", "放行话术", "拦下话术"}, []string{"缓冲", "放行", "拦下"}, "text", "")
+
+	got, err := RenderDoneCard(draft, doneSent, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "草稿 ②（放行）") {
+		t.Errorf("chosen candidate should keep its label: %s", got)
+	}
+	for _, bad := range []string{"（缓冲）", "（拦下）"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("should not contain %q: %s", bad, got)
+		}
+	}
+}
+
 // note 非空时在全部候选之后、共享按钮之前追加灰字「依据」状态行（表态门禁），
 // 空值整体省略；完成态改卡时依据行（非按钮、无 element_id）不受剔除影响。
 func TestRenderDraftCardNote(t *testing.T) {
 	card := RenderDraftCard("om_note", "私聊", "张三", "", "原消息",
-		[]string{"我看下这块再回你"}, "text", "未验证对方建议，表态请自行判断")
+		[]string{"我看下这块再回你"}, nil, "text", "未验证对方建议，表态请自行判断")
 	want := "<font color='grey'>依据：未验证对方建议，表态请自行判断</font>"
 	if !strings.Contains(card, want) {
 		t.Errorf("card missing note line %q: %s", want, card)
@@ -662,14 +734,14 @@ func TestRenderDraftCardNote(t *testing.T) {
 		t.Errorf("done card should keep note line: %s", done)
 	}
 
-	if strings.Contains(RenderDraftCard("om_non", "", "", "", "", []string{"x"}, "text", ""), "依据：") {
+	if strings.Contains(RenderDraftCard("om_non", "", "", "", "", []string{"x"}, nil, "text", ""), "依据：") {
 		t.Error("empty note should omit the note line")
 	}
 }
 
 // 完成态更新头部标题（脱离「待确认」）：发卡渲染标题，改卡替换为完成态标题。
 func TestRenderDoneCardUpdatesTitle(t *testing.T) {
-	draft := RenderDraftCard("om_title", "私聊", "张三", "12:03", "原始消息", []string{"草稿内容"}, "text", "")
+	draft := RenderDraftCard("om_title", "私聊", "张三", "12:03", "原始消息", []string{"草稿内容"}, nil, "text", "")
 	if !strings.Contains(draft, "回复草稿待确认") {
 		t.Fatalf("draft card should have pending title: %s", draft)
 	}
@@ -976,7 +1048,7 @@ func TestCardOperatorFilter(t *testing.T) {
 // 都显式禁转发（平台默认允许转发）。
 func TestRenderCardsDisableForward(t *testing.T) {
 	for name, card := range map[string]string{
-		"draft": RenderDraftCard("om_fw", "", "", "", "", []string{"x"}, "text", ""),
+		"draft": RenderDraftCard("om_fw", "", "", "", "", []string{"x"}, nil, "text", ""),
 		"book": RenderBookCard("om_fw", "", "", "", "",
 			[]BookSlot{{Date: "07-22", Time: "14:00-15:00"}}, "会", nil),
 	} {

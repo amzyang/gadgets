@@ -141,6 +141,8 @@ func run(cmd string, args []string) error {
 		mid := fs.String("mid", "", "原消息 message_id")
 		var drafts multiFlag
 		fs.Var(&drafts, "draft", "草稿文件路径（- 为 stdin；可重复给出多候选）")
+		var labels multiFlag
+		fs.Var(&labels, "label", "候选方向短标签，与 --draft 等数按序配对（全不给=不标注，空串=该位不标）")
 		original := fs.String("original", "", "原消息文本")
 		from := fs.String("from", "", "发送者名")
 		scene := fs.String("scene", "", "私聊或群名")
@@ -149,14 +151,14 @@ func run(cmd string, args []string) error {
 		note := fs.String("note", "", "判断依据状态行（表态门禁场景带上）")
 		fs.Parse(args)
 		if *mid == "" || len(drafts) == 0 || (*format != "text" && *format != "markdown") {
-			return fmt.Errorf("usage: lark-watch send-card --mid <mid> --draft <file|-> [--draft <file>]... [--format text|markdown] [--original <text>] [--from <name>] [--scene <私聊|群名>] [--t <time>] [--note <text>]")
+			return fmt.Errorf("usage: lark-watch send-card --mid <mid> --draft <file|-> [--draft <file>]... [--label <短标签>]... [--format text|markdown] [--original <text>] [--from <name>] [--scene <私聊|群名>] [--t <time>] [--note <text>]")
 		}
 		s, err := openStore()
 		if err != nil {
 			return err
 		}
 		defer s.Close()
-		return watch.RunSendCard(s, cli, watch.DefaultPaths(), *mid, drafts, *original, *from, *scene, *t, *format, *note)
+		return watch.RunSendCard(s, cli, watch.DefaultPaths(), *mid, drafts, labels, *original, *from, *scene, *t, *format, *note)
 
 	case "send-book-card":
 		fs := flag.NewFlagSet(cmd, flag.ExitOnError)

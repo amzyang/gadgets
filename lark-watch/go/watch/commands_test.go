@@ -23,7 +23,7 @@ func TestRunSendCardMulti(t *testing.T) {
 	os.WriteFile(p1, []byte("候选一\n"), 0o644)
 	os.WriteFile(p2, []byte("候选二\n"), 0o644)
 
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_sc", []string{p1, p2}, "原消息", "张三", "私聊", "12:00", "text", ""); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_sc", []string{p1, p2}, nil, "原消息", "张三", "私聊", "12:00", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 	sent := findLogs(logs(), "card.sent")
@@ -46,6 +46,63 @@ func TestRunSendCardMulti(t *testing.T) {
 	// 发卡返回的卡片 message_id 落库（alerter 路径改卡完成态的凭证）
 	if _, cardMid, ok := s.PendingCard("om_sc"); !ok || cardMid != "om_card_1" {
 		t.Errorf("card_mid: got %q (ok=%v), want om_card_1", cardMid, ok)
+	}
+}
+
+// send-card --label：标签只渲染进卡片候选标题，pending 里 drafts 仍是无标签
+// 原文（发送/复制/横幅均取 pending，发出的消息天然不带括注）。
+func TestRunSendCardLabels(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	dir := t.TempDir()
+	p1 := filepath.Join(dir, "d1.md")
+	p2 := filepath.Join(dir, "d2.md")
+	os.WriteFile(p1, []byte("缓冲话术"), 0o644)
+	os.WriteFile(p2, []byte("放行话术"), 0o644)
+
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_lb", []string{p1, p2}, []string{"缓冲", "放行"}, "原消息", "张三", "私聊", "12:00", "text", ""); err != nil {
+		t.Fatal(err)
+	}
+	drafts, _, card, ok := s.PendingGet("om_lb")
+	if !ok || len(drafts) != 2 || drafts[0] != "缓冲话术" || drafts[1] != "放行话术" {
+		t.Fatalf("pending drafts should be label-free originals: %q (ok=%v)", drafts, ok)
+	}
+	for _, want := range []string{"**草稿 ①（缓冲）**", "**草稿 ②（放行）**"} {
+		if !strings.Contains(card, want) {
+			t.Errorf("card missing %q\n%s", want, card)
+		}
+	}
+}
+
+// label 数与 draft 数不符（且非全不给）：发卡时立即报错，不入库不发卡。
+// 多给指向不存在的候选；少给会静默按 0 起位错挂方向标签——「扫标签即选」下
+// 用户可能以错误立场发出，必须硬失败。某位不标用空串占位。
+func TestRunSendCardLabelCountMismatch(t *testing.T) {
+	s := openTestStore(t)
+	cli := &fakeCLI{}
+	dir := t.TempDir()
+	p1 := filepath.Join(dir, "d1.md")
+	p2 := filepath.Join(dir, "d2.md")
+	os.WriteFile(p1, []byte("候选一"), 0o644)
+	os.WriteFile(p2, []byte("候选二"), 0o644)
+
+	for name, c := range map[string]struct {
+		paths  []string
+		labels []string
+	}{
+		"多给": {[]string{p1}, []string{"缓冲", "放行"}},
+		"少给": {[]string{p1, p2}, []string{"缓冲"}},
+	} {
+		err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_mm", c.paths, c.labels, "", "", "", "", "text", "")
+		if err == nil || !strings.Contains(err.Error(), "label") {
+			t.Fatalf("%s: want label count error, got %v", name, err)
+		}
+		if _, _, _, ok := s.PendingGet("om_mm"); ok {
+			t.Errorf("%s: pending should not be stored", name)
+		}
+	}
+	if cli.hasCall("send-card") {
+		t.Errorf("card should not be sent: %v", cli.calls)
 	}
 }
 
@@ -83,7 +140,7 @@ func TestRunSendCardReleasesDeferredNotify(t *testing.T) {
 	d2 := filepath.Join(dir, "d2.md")
 	os.WriteFile(d1, []byte("好的，我看下"), 0o644)
 	os.WriteFile(d2, []byte("在忙，晚点回你"), 0o644)
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{d1, d2}, "帮我看个问题", "张三", "私聊", "12:01", "text", ""); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{d1, d2}, nil, "帮我看个问题", "张三", "私聊", "12:01", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -118,7 +175,7 @@ func TestRunSendCardNoDeferredNotify(t *testing.T) {
 
 	draft := filepath.Join(dir, "d.md")
 	os.WriteFile(draft, []byte("好的"), 0o644)
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_x", []string{draft}, "", "", "", "", "text", ""); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_x", []string{draft}, nil, "", "", "", "", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -153,7 +210,7 @@ func TestRunSendCardSkipsRepliedNotify(t *testing.T) {
 
 	draft := filepath.Join(dir, "d.md")
 	os.WriteFile(draft, []byte("好的"), 0o644)
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, "必须是这个", "张三", "私聊", "12:01", "text", ""); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, nil, "必须是这个", "张三", "私聊", "12:01", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -189,7 +246,7 @@ func TestRunSendCardDropsRepliedKeepsNewer(t *testing.T) {
 
 	draft := filepath.Join(dir, "d.md")
 	os.WriteFile(draft, []byte("好的"), 0o644)
-	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, "必须是这个", "张三", "私聊", "12:02", "text", ""); err != nil {
+	if err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_2", []string{draft}, nil, "必须是这个", "张三", "私聊", "12:02", "text", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(waitForFile(t, out)); got != "张三（私聊）: 必须是这个" {
@@ -222,7 +279,7 @@ func TestRunSendDraft(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	stubSendDraftAlert(t)
-	card := RenderDraftCard("om_p1", "私聊", "张三", "", "原消息", []string{"候选一", "候选二"}, "text", "")
+	card := RenderDraftCard("om_p1", "私聊", "张三", "", "原消息", []string{"候选一", "候选二"}, nil, "text", "")
 	s.PendingPut("om_p1", []string{"候选一", "候选二"}, "text", card, 1)
 	s.PendingSetCardMid("om_p1", "om_card_p1")
 
@@ -352,7 +409,7 @@ func TestRunSendText(t *testing.T) {
 	s := openTestStore(t)
 	cli := &fakeCLI{}
 	stubSendDraftAlert(t)
-	card := RenderDraftCard("om_q1", "私聊", "张三", "", "原消息", []string{"候选"}, "text", "")
+	card := RenderDraftCard("om_q1", "私聊", "张三", "", "原消息", []string{"候选"}, nil, "text", "")
 	s.PendingPut("om_q1", []string{"候选"}, "text", card, 1)
 	s.PendingSetCardMid("om_q1", "om_card_q1")
 	paths := Paths{ConfigDir: t.TempDir()}
@@ -441,7 +498,7 @@ func TestRunSendCardEmptyDraft(t *testing.T) {
 	os.WriteFile(p1, []byte("候选一"), 0o644)
 	os.WriteFile(p2, []byte("\n"), 0o644)
 
-	err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_e", []string{p1, p2}, "", "", "", "", "text", "")
+	err := RunSendCard(s, cli, Paths{ConfigDir: dir}, "om_e", []string{p1, p2}, nil, "", "", "", "", "text", "")
 	if err == nil || !strings.Contains(err.Error(), "draft 2 is empty") {
 		t.Fatalf("want draft 2 empty error, got %v", err)
 	}
