@@ -172,6 +172,17 @@ type BookFailedEvent struct {
 	Mid    string `json:"mid"`
 }
 
+// ReminderEvent 是延时提醒到期事件（p:"reminder"）：横幅已由 daemon 弹出
+// （remindNotifyFn），模型据此知晓提醒已触达，一般简短转述即可、无需行动。
+// Mid 为安排时的去重键（可空），Due 为原定提醒时刻（分钟精度）。
+type ReminderEvent struct {
+	P     string `json:"p"`
+	Title string `json:"title"`
+	Msg   string `json:"msg"`
+	Mid   string `json:"mid,omitempty"`
+	Due   string `json:"due"`
+}
+
 // RestrictedChat 是开启防泄密模式而被跳过监控的群（API 无法读取，status 可见）。
 type RestrictedChat struct {
 	Cid   string `json:"cid"`
@@ -187,6 +198,7 @@ type Status struct {
 	ConsumerState        string           `json:"consumer_state"`
 	Pending              int              `json:"pending"`
 	PendingBook          int              `json:"pending_book"`
+	Reminders            int              `json:"reminders"`
 	DigestBuffered       int              `json:"digest_buffered"`
 	LastFlush            int64            `json:"last_flush"`
 	RestrictedChats      []RestrictedChat `json:"restricted_chats,omitempty"`

@@ -120,8 +120,9 @@ func (p *Poller) Run(ctx context.Context, self string) error {
 
 		p.clampStaleGap()
 		nowEpoch := p.now()
-		// 到期兜底先于 tick：API 故障退避期间延迟通知也能按时释放
+		// 到期兜底先于 tick：API 故障退避期间延迟通知/提醒也能按时释放
 		p.flushDueNotify(ctx, nowEpoch)
+		p.flushDueReminders(ctx, nowEpoch)
 		if err := p.tick(ctx, nowEpoch, self); err != nil {
 			fails++
 			if IsAuthError(err) {
@@ -532,6 +533,35 @@ func (p *Poller) flushDueNotify(ctx context.Context, now int64) {
 	evlog.Info("notify.flush", "n", len(batch), "mids", mids(batch), "script", script != "", "enabled", enabled)
 	if enabled {
 		p.goNotify(func() { RunNotify(ctx, p.Paths.ConfigDir, script, batch, p.resolveIcon(batch)) })
+	}
+}
+
+// flushDueReminders 释放到期的延时提醒（notify --at/--in 落盘）：弹横幅 +
+// emit p:"reminder" 事件 + evlog 留痕。迟到超 MaxGap 的直接丢弃——休眠合盖
+// 回来不补弹半天前的提醒，对齐游标夹紧哲学；窗口内的照弹（迟到的会议提醒仍有
+// 价值）。横幅绕开 off 总开关与前台抑制（见 remindNotifyFn）；内容自包含文本，
+// 无 dropReplied 一类的新鲜度复核。
+func (p *Poller) flushDueReminders(ctx context.Context, now int64) {
+	batch, err := p.Store.ReminderTakeDue(now)
+	if err != nil {
+		logf("reminder take failed: %v", err)
+		return
+	}
+	maxGap := MaxGap()
+	for _, r := range batch {
+		if now-r.Due > maxGap {
+			logf("dropped stale reminder (due %s): %s", FmtMinute(r.Due), r.Title)
+			evlog.Info("reminder.drop", "mid", r.Mid, "due", r.Due, "late", now-r.Due)
+			continue
+		}
+		evlog.Info("reminder.fire", "mid", r.Mid, "due", r.Due, "late", now-r.Due)
+		p.emit(ReminderEvent{P: "reminder", Title: r.Title, Msg: r.Message, Mid: r.Mid, Due: FmtMinute(r.Due)})
+		p.goNotify(func() {
+			if err := remindNotifyFn(ctx, p.Paths, r.Title, r.Message, r.Link); err != nil && ctx.Err() == nil {
+				logf("reminder notify failed: %v", err)
+				evlog.Error("notify.fail", "kind", "reminder", "mid", r.Mid, "err", err.Error())
+			}
+		})
 	}
 }
 

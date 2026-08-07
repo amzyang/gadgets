@@ -587,6 +587,119 @@ func TestRunIgnoreAddHashPrefix(t *testing.T) {
 	}
 }
 
+func TestParseAt(t *testing.T) {
+	now := time.Date(2026, 8, 7, 14, 0, 30, 0, time.Local)
+	t.Run("今天未来时刻", func(t *testing.T) {
+		got, err := ParseAt("15:30", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := time.Date(2026, 8, 7, 15, 30, 0, 0, time.Local).Unix(); got != want {
+			t.Errorf("got %d, want %d", got, want)
+		}
+	})
+	t.Run("带日期未来时刻", func(t *testing.T) {
+		got, err := ParseAt("08-08 09:15", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := time.Date(2026, 8, 8, 9, 15, 0, 0, time.Local).Unix(); got != want {
+			t.Errorf("got %d, want %d", got, want)
+		}
+	})
+	t.Run("裸时间已过报错并指路", func(t *testing.T) {
+		_, err := ParseAt("09:15", now)
+		if err == nil || !strings.Contains(err.Error(), "已过") || !strings.Contains(err.Error(), "--in") {
+			t.Errorf("want 已过 error with --in hint, got %v", err)
+		}
+	})
+	t.Run("同分钟不算未来", func(t *testing.T) {
+		if _, err := ParseAt("14:00", now); err == nil {
+			t.Error("14:00 at 14:00:30 should be past")
+		}
+	})
+	t.Run("带日期已过报错", func(t *testing.T) {
+		_, err := ParseAt("03-01 10:00", now)
+		if err == nil || !strings.Contains(err.Error(), "已过") {
+			t.Errorf("want 已过 error, got %v", err)
+		}
+	})
+	for name, v := range map[string]string{
+		"缺前导零": "9:15",
+		"带年":   "2026-08-08 09:15",
+		"只有日期": "08-08",
+		"小时越界": "25:00",
+		"日期越界": "02-30 10:00",
+		"多余空格": "08-08  09:15",
+	} {
+		if _, err := ParseAt(v, now); err == nil {
+			t.Errorf("%s: want error for %q", name, v)
+		}
+	}
+}
+
+func TestParseRemindDue(t *testing.T) {
+	now := time.Date(2026, 8, 7, 14, 0, 0, 0, time.Local)
+	if due, err := ParseRemindDue("", "", now); err != nil || due != 0 {
+		t.Errorf("双空应返回 (0, nil)，got %d %v", due, err)
+	}
+	if _, err := ParseRemindDue("15:00", "5m", now); err == nil || !strings.Contains(err.Error(), "互斥") {
+		t.Errorf("want 互斥 error, got %v", err)
+	}
+	if due, err := ParseRemindDue("", "90m", now); err != nil || due != now.Unix()+90*60 {
+		t.Errorf("--in 90m: got %d %v", due, err)
+	}
+	for _, in := range []string{"0", "-5m", "xx"} {
+		if _, err := ParseRemindDue("", in, now); err == nil {
+			t.Errorf("--in %q should error", in)
+		}
+	}
+	if due, err := ParseRemindDue("15:00", "", now); err != nil ||
+		due != time.Date(2026, 8, 7, 15, 0, 0, 0, time.Local).Unix() {
+		t.Errorf("--at 委托 ParseAt: got %d %v", due, err)
+	}
+}
+
+// RunRemind 落盘 + reminder.set 锚点；心跳新鲜时不告警。落盘成功不等于会弹
+// （执行者是 run daemon），但落盘总是值得的。
+func TestRunRemind(t *testing.T) {
+	logs := captureEvlog(t)
+	s := openTestStore(t)
+	s.MetaSetInt("heartbeat", 995)
+
+	r := Reminder{Mid: "om_r1", Title: "早会提醒", Message: "9:20 敬业 早会", Link: "lark://x", Due: 1500}
+	if err := RunRemind(s, r, 1000); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReminderTakeDue(1500)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("take: %+v %v", got, err)
+	}
+	if got[0] != r {
+		t.Errorf("reminder: %+v", got[0])
+	}
+	set := findLogs(logs(), "reminder.set")
+	if len(set) != 1 || set[0]["mid"] != "om_r1" || set[0]["due"] != float64(1500) {
+		t.Errorf("reminder.set: %v", set)
+	}
+	if logsContain(logs(), "心跳") {
+		t.Error("heartbeat fresh (5s ago): no warning expected")
+	}
+}
+
+// daemon 心跳缺失/陈旧时落盘告警：提醒的唯一执行者是 run daemon，
+// 静默哑弹是最危险的失败模式，落盘时就提示而非到期才发现。
+func TestRunRemindWarnsStaleHeartbeat(t *testing.T) {
+	logs := captureEvlog(t)
+	s := openTestStore(t)
+	if err := RunRemind(s, Reminder{Title: "t", Message: "m", Due: 2000}, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if !logsContain(logs(), "心跳") {
+		t.Error("missing heartbeat should warn")
+	}
+}
+
 // --peek 负值（flag 手误透传）按 0 处理：不在 CatchupGroup 的切片分配处
 // panic，照常输出分组结果（peek 列表为空）。
 func TestRunCatchupNegativePeek(t *testing.T) {

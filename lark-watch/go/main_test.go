@@ -32,6 +32,7 @@ func TestMissingRequiredFlags(t *testing.T) {
 		{"send-text 缺 text", []string{"send-text", "--mid", "m"}},
 		{"react 无 mid", []string{"react"}},
 		{"notify 无 message", []string{"notify"}},
+		{"notify 只给 mid 不定时", []string{"notify", "--mid", "m", "--message", "x"}},
 		{"mark 无参", []string{"mark"}},
 		{"ignore-add 无参", []string{"ignore-add"}},
 		{"ignore-add 空正则", []string{"ignore-add", ""}},
@@ -115,6 +116,27 @@ func TestStringArrayFlags(t *testing.T) {
 			}
 			if !slices.Equal(got, c.want) {
 				t.Fatalf("want %v, got %v", c.want, got)
+			}
+		})
+	}
+}
+
+// 定时参数错误必须在触达 store 前返回（测试不落真实 StateDir）：互斥、格式错。
+// 合法定时值会写库，此处只走必败路径。
+func TestNotifyScheduleFlagErrors(t *testing.T) {
+	cases := []struct {
+		name, want string
+		args       []string
+	}{
+		{"at 与 in 互斥", "互斥", []string{"notify", "--message", "x", "--at", "09:00", "--in", "5m"}},
+		{"at 格式错", "invalid --at", []string{"notify", "--message", "x", "--at", "9:15"}},
+		{"in 非法", "invalid", []string{"notify", "--message", "x", "--in", "-5m"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := execute(t, c.args...)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want error containing %q, got %v", c.want, err)
 			}
 		})
 	}

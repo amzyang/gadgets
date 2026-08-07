@@ -93,6 +93,97 @@ func TestFlushDigestTakeFailureLogged(t *testing.T) {
 	}
 }
 
+// 到期且迟到在 MaxGap 内：恰一次横幅调用 + p:"reminder" 事件 + 表清空 +
+// reminder.fire 留痕。
+func TestFlushDueRemindersFires(t *testing.T) {
+	logs := captureEvlog(t)
+	var calls []string
+	old := remindNotifyFn
+	remindNotifyFn = func(_ context.Context, _ Paths, title, message, link string) error {
+		calls = append(calls, title+"|"+message+"|"+link)
+		return nil
+	}
+	t.Cleanup(func() { remindNotifyFn = old })
+	p, events := newTestPoller(t, &listFake{}, 1000)
+	p.Store.ReminderPut(Reminder{Mid: "om_r", Title: "早会提醒", Message: "9:20 早会", Link: "lark://x", Due: 900}, 800)
+
+	p.flushDueReminders(context.Background(), 1000)
+	p.notifyWG.Wait()
+
+	if len(calls) != 1 || calls[0] != "早会提醒|9:20 早会|lark://x" {
+		t.Errorf("notify calls: %v", calls)
+	}
+	if len(*events) != 1 || !strings.Contains(string((*events)[0]), `"p":"reminder"`) ||
+		!strings.Contains(string((*events)[0]), "om_r") {
+		t.Errorf("events: %q", *events)
+	}
+	if n := p.Store.ReminderCount(); n != 0 {
+		t.Errorf("reminder should be consumed, count=%d", n)
+	}
+	if fire := findLogs(logs(), "reminder.fire"); len(fire) != 1 || fire[0]["mid"] != "om_r" {
+		t.Errorf("reminder.fire: %v", fire)
+	}
+}
+
+// 未到期条目原地留存：不弹、不 emit、不删。
+func TestFlushDueRemindersSkipsFuture(t *testing.T) {
+	old := remindNotifyFn
+	called := false
+	remindNotifyFn = func(context.Context, Paths, string, string, string) error { called = true; return nil }
+	t.Cleanup(func() { remindNotifyFn = old })
+	p, events := newTestPoller(t, &listFake{}, 1000)
+	p.Store.ReminderPut(Reminder{Title: "未来", Due: 2000}, 900)
+
+	p.flushDueReminders(context.Background(), 1000)
+	p.notifyWG.Wait()
+
+	if called || len(*events) != 0 || p.Store.ReminderCount() != 1 {
+		t.Errorf("future reminder must stay: called=%v events=%d count=%d",
+			called, len(*events), p.Store.ReminderCount())
+	}
+}
+
+// 迟到超 MaxGap（休眠合盖/停机重启）：不弹不 emit，条目消费掉，reminder.drop
+// 留痕——不补弹半天前的提醒，对齐游标夹紧哲学。
+func TestFlushDueRemindersDropsStale(t *testing.T) {
+	logs := captureEvlog(t)
+	old := remindNotifyFn
+	called := false
+	remindNotifyFn = func(context.Context, Paths, string, string, string) error { called = true; return nil }
+	t.Cleanup(func() { remindNotifyFn = old })
+	p, events := newTestPoller(t, &listFake{}, 5000)
+	p.Store.ReminderPut(Reminder{Mid: "om_s", Title: "旧提醒", Due: 1000}, 900)
+
+	p.flushDueReminders(context.Background(), 5000) // late=4000 > MaxGap(900)
+	p.notifyWG.Wait()
+
+	if called || len(*events) != 0 {
+		t.Errorf("stale reminder must not fire: called=%v events=%d", called, len(*events))
+	}
+	if n := p.Store.ReminderCount(); n != 0 {
+		t.Errorf("stale reminder should be consumed, count=%d", n)
+	}
+	if drop := findLogs(logs(), "reminder.drop"); len(drop) != 1 || drop[0]["mid"] != "om_s" {
+		t.Errorf("reminder.drop: %v", drop)
+	}
+}
+
+// 读库失败必须留痕（对齐 flushDigest 教训：静默 return = 提醒丢失零痕迹）。
+func TestFlushDueRemindersTakeFailureLogged(t *testing.T) {
+	logs := captureEvlog(t)
+	p, events := newTestPoller(t, &listFake{}, 1000)
+	p.Store.Close()
+
+	p.flushDueReminders(context.Background(), 1000)
+
+	if len(*events) != 0 {
+		t.Errorf("no events expected, got %d", len(*events))
+	}
+	if !logsContain(logs(), "reminder take failed") {
+		t.Error("take failure should be logged")
+	}
+}
+
 // 首 tick：所有会话懒初始化游标为 now，不拉取（不重放历史）。
 func TestTickLazyInit(t *testing.T) {
 	f := &listFake{chats: []ChatMeta{

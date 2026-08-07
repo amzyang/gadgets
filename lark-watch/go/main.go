@@ -337,22 +337,40 @@ func newReactCmd(cli *watch.ExecLarkCLI) *cobra.Command {
 }
 
 func newNotifyCmd() *cobra.Command {
-	var title, message, link string
+	var title, message, link, at, in, mid string
 	cmd := &cobra.Command{
-		Use:                   "notify --message <text> [--title <t>] [--link <lark://…>]",
-		Short:                 "发送系统通知（优先 notify 配置脚本，缺省内置横幅，依赖 alerter）",
+		Use:                   "notify --message <text> [--title <t>] [--link <lark://…>] [--at '[MM-DD ]HH:MM' | --in <时长>] [--mid <mid>]",
+		Short:                 "发送系统通知；--at/--in 定时（落盘延时提醒，由 run daemon 到期弹出）",
 		Args:                  cobra.NoArgs,
 		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if message == "" {
 				return usageErr(cmd)
 			}
-			return watch.RunNotifyCommand(daemonCtx(), watch.DefaultPaths(), title, message, link)
+			now := time.Now()
+			due, err := watch.ParseRemindDue(at, in, now)
+			if err != nil {
+				return err
+			}
+			if due == 0 {
+				// --mid 只对定时提醒有意义：立即通知带它多半是想定时却漏了 --at/--in
+				if mid != "" {
+					return usageErr(cmd)
+				}
+				return watch.RunNotifyCommand(daemonCtx(), watch.DefaultPaths(), title, message, link)
+			}
+			return withStore(func(s *watch.Store) error {
+				r := watch.Reminder{Mid: mid, Title: title, Message: message, Link: link, Due: due}
+				return watch.RunRemind(s, r, now.Unix())
+			})
 		},
 	}
 	cmd.Flags().StringVar(&title, "title", "飞书提醒", "通知标题")
 	cmd.Flags().StringVar(&message, "message", "", "通知内容")
 	cmd.Flags().StringVar(&link, "link", "", "点击「跳转」打开的 applink（lark://…）")
+	cmd.Flags().StringVar(&at, "at", "", "定时：'[MM-DD ]HH:MM'（本地时区，缺日期=今天，须为未来时刻）")
+	cmd.Flags().StringVar(&in, "in", "", "延时：'90m'/'2h'/纯秒（与 --at 互斥）")
+	cmd.Flags().StringVar(&mid, "mid", "", "去重键：同 mid 重复安排覆盖旧提醒（仅配合 --at/--in）")
 	return cmd
 }
 

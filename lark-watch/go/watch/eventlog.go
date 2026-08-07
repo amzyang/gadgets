@@ -105,6 +105,8 @@ func logEmit(v any) {
 		evlog.Info("emit", "kind", "alert", "alert_kind", e.Kind, "text", e.Msg)
 	case Backlog:
 		evlog.Info("emit", "kind", "backlog", "offline_secs", e.OfflineSecs)
+	case ReminderEvent:
+		evlog.Info("emit", "kind", "reminder", "mid", e.Mid, "due", e.Due, "text", e.Title)
 	default:
 		evlog.Info("emit", "kind", fmt.Sprintf("%T", v))
 	}

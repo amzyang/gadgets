@@ -33,6 +33,77 @@ func ParseDuration(s string) (int64, error) {
 	return n * mul, nil
 }
 
+// atRe 校验 --at 值：'[MM-DD ]HH:MM'（24 小时制两位数字；对齐 slotRe 的严格
+// 哲学——自然语言时间归模型解析，Go 只收固定格式）。
+var atRe = regexp.MustCompile(`^(?:(\d{2}-\d{2}) )?(\d{2}:\d{2})$`)
+
+// ParseAt 把 '[MM-DD ]HH:MM' 按本地时区解析为 epoch 秒：缺日期 = now 当天，
+// 年份 = 今年。结果必须晚于 now；裸时间已过不自动滚到明天——「9:20 早会」拖到
+// 9:30 才处理时静默安排到明天是错误行为，报错让调用方显式决策（写日期或改 --in）。
+func ParseAt(s string, now time.Time) (int64, error) {
+	m := atRe.FindStringSubmatch(s)
+	if m == nil {
+		return 0, fmt.Errorf("invalid --at %q (want '[MM-DD ]HH:MM'，如 '09:15' 或 '08-08 09:15')", s)
+	}
+	date := m[1]
+	if date == "" {
+		date = now.Format("01-02")
+	}
+	// 25:00、02-30 这类正则放行的越界值由 ParseInLocation 拒绝（out of range）
+	tm, err := time.ParseInLocation(minuteLayout, fmt.Sprintf("%04d-%s %s", now.Year(), date, m[2]), time.Local)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --at %q (%v)", s, err)
+	}
+	if !tm.After(now) {
+		if m[1] == "" {
+			return 0, fmt.Errorf("--at %s 已过（现在 %s）：跨天请写 'MM-DD HH:MM'，或改用 --in", s, now.Format("15:04"))
+		}
+		return 0, fmt.Errorf("--at %q 已过（现在 %s）；跨年请改用 --in", s, now.Format(minuteLayout))
+	}
+	return tm.Unix(), nil
+}
+
+// ParseRemindDue 解析 notify 子命令的定时参数：--at 与 --in 互斥，都空返回
+// (0, nil) 表示立即通知；--in 复用 ParseDuration 且必须为正时长。
+func ParseRemindDue(at, in string, now time.Time) (int64, error) {
+	switch {
+	case at != "" && in != "":
+		return 0, fmt.Errorf("--at 与 --in 互斥，只能给一个")
+	case at != "":
+		return ParseAt(at, now)
+	case in != "":
+		secs, err := ParseDuration(in)
+		if err != nil {
+			return 0, err
+		}
+		if secs <= 0 {
+			return 0, fmt.Errorf("invalid --in %q（须为正时长）", in)
+		}
+		return now.Unix() + secs, nil
+	}
+	return 0, nil
+}
+
+// remindHeartbeatStale 是 RunRemind 落盘时的 daemon 判活阈值（秒）：心跳比它
+// 陈旧说明 daemon 可能没在跑，提醒会静默哑弹——落盘时就提示，而非到期才发现。
+// 宽于轮询间隔数倍即可，心跳每个成功 tick 刷一次。
+const remindHeartbeatStale = 60
+
+// RunRemind 把延时提醒落盘，由 run daemon 到期弹横幅并回报 p:"reminder" 事件
+// （flushDueReminders）。r.Mid 非空时同 mid 覆盖旧条目（模型重复处理同一消息
+// 不重复提醒）。心跳陈旧只告警不拒绝：落盘总是值得的，daemon 随后拉起仍按时释放。
+func RunRemind(s *Store, r Reminder, now int64) error {
+	if err := s.ReminderPut(r, now); err != nil {
+		return err
+	}
+	evlog.Info("reminder.set", "mid", r.Mid, "due", r.Due, "in", r.Due-now)
+	logf("reminder set: %s (due %s)", r.Title, FmtMinute(r.Due))
+	if hb, ok := s.MetaGetInt("heartbeat"); !ok || now-hb > remindHeartbeatStale {
+		logf("警告：run daemon 心跳陈旧，提醒到期依赖 daemon 存活（lark-watch status 可查）")
+	}
+	return nil
+}
+
 // RunCatchup 补课：拉积压消息按会话分组输出单行 JSON。
 func RunCatchup(s *Store, cli LarkCLI, paths Paths, since string, peek int) error {
 	if peek < 0 {
@@ -404,7 +475,7 @@ func buildStatus(s *Store, cli LarkCLI, paths Paths, now time.Time) Status {
 	st := Status{
 		Cursor: cursor, Heartbeat: heartbeat, HeartbeatAge: now.Unix() - heartbeat,
 		ConsumerState: consumer, Pending: s.PendingCount(), PendingBook: s.BookPendingCount(),
-		DigestBuffered: s.DigestCount(), LastFlush: lastFlush,
+		Reminders: s.ReminderCount(), DigestBuffered: s.DigestCount(), LastFlush: lastFlush,
 	}
 	st.RestrictedChats, _ = s.RestrictedList()
 	if eventLogEnabled() {

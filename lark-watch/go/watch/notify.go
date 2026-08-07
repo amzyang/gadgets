@@ -334,6 +334,11 @@ func notifyEnv(title, message, link string) []string {
 	}
 }
 
+// remindNotifyFn 是延时提醒到期横幅入口，可注入测试替身（IO 边缘，对齐
+// vcDialogFn 范式）。复用 notify 子命令路径：用户/模型显式安排的提醒绕开
+// off 总开关与前台抑制——人在飞书前台也要弹早会提醒。
+var remindNotifyFn = RunNotifyCommand
+
 // RunNotifyCommand 是 notify 子命令入口：响铃后发送一条系统通知。
 // 优先执行用户 notify 自定义脚本（LW_SUMMARY 与批次模板兼容，取 message）；
 // 无脚本时走内置横幅——子命令是显式触发，off 总开关只管自动通知，不拦这里。

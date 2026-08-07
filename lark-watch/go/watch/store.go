@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, f
 CREATE TABLE IF NOT EXISTS book_pending (mid TEXT PRIMARY KEY, slots TEXT NOT NULL, title TEXT NOT NULL, participants TEXT NOT NULL, card TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notify_wait (mid TEXT PRIMARY KEY, cid TEXT NOT NULL, msg TEXT NOT NULL, due INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS reminder (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, message TEXT NOT NULL, link TEXT NOT NULL, due INTEGER NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS chat_state (cid TEXT PRIMARY KEY, self_last TEXT NOT NULL);
@@ -650,6 +651,82 @@ func scanMessages(rows *sql.Rows, err error) ([]Message, error) {
 			return nil, err
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ---------- reminder（延时提醒：notify --at/--in 落盘，daemon 到期弹横幅）----------
+
+// Reminder 是延时提醒条目。Mid 可空；非空时作去重键（同 mid 覆盖旧条目，
+// 模型重复处理同一消息不重复提醒）。独立于 notify_wait：那张表的陈旧条目会被
+// clampStaleGap 无条件丢弃（延迟窗口秒级），提醒的时间跨度是小时级，语义不同。
+type Reminder struct {
+	Mid, Title, Message, Link string
+	Due                       int64
+}
+
+// ReminderPut 落盘一条提醒；mid 非空时先删同 mid 旧条目（同一事务，语义 = 覆盖）。
+func (s *Store) ReminderPut(r Reminder, now int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if r.Mid != "" {
+		if _, err := tx.Exec(`DELETE FROM reminder WHERE mid = ?`, r.Mid); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO reminder(mid, title, message, link, due, created) VALUES(?, ?, ?, ?, ?, ?)`,
+		r.Mid, r.Title, r.Message, r.Link, r.Due, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReminderTakeDue 取出并删除全部到期条目（同一事务；SELECT 先行，无到期条目时
+// 纯读返回——每 tick 热路径不占写锁，对齐 NotifyDeferTakeDue）。按 due, id 升序。
+func (s *Store) ReminderTakeDue(now int64) ([]Reminder, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	out, err := scanReminders(tx.Query(
+		`SELECT mid, title, message, link, due FROM reminder WHERE due <= ? ORDER BY due, id`, now))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.Exec(`DELETE FROM reminder WHERE due <= ?`, now); err != nil {
+		return nil, err
+	}
+	return out, tx.Commit()
+}
+
+// ReminderCount 供 status 观测待触发提醒数。
+func (s *Store) ReminderCount() int {
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM reminder`).Scan(&n)
+	return n
+}
+
+// scanReminders 把 reminder 查询结果解码为条目列表（scanMessages 的同形态变体）。
+func scanReminders(rows *sql.Rows, err error) ([]Reminder, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Reminder
+	for rows.Next() {
+		var r Reminder
+		if err := rows.Scan(&r.Mid, &r.Title, &r.Message, &r.Link, &r.Due); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }

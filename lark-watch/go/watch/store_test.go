@@ -662,6 +662,48 @@ func TestBookPendingCRUD(t *testing.T) {
 	}
 }
 
+// TakeDue 只取到期条目且删除；未到期留存待下轮；空表走纯读路径返回 nil。
+func TestReminderPutTakeDue(t *testing.T) {
+	s := openTestStore(t)
+	s.ReminderPut(Reminder{Mid: "m1", Title: "a", Due: 100}, 50)
+	s.ReminderPut(Reminder{Mid: "m2", Title: "b", Due: 200}, 50)
+
+	got, err := s.ReminderTakeDue(150)
+	if err != nil || len(got) != 1 || got[0].Title != "a" {
+		t.Fatalf("take(150): %+v %v", got, err)
+	}
+	if n := s.ReminderCount(); n != 1 {
+		t.Errorf("count after take: %d, want 1", n)
+	}
+	if got, _ = s.ReminderTakeDue(300); len(got) != 1 || got[0].Title != "b" {
+		t.Fatalf("take(300): %+v", got)
+	}
+	if got, err := s.ReminderTakeDue(999); err != nil || got != nil {
+		t.Errorf("empty take: %v %v", got, err)
+	}
+}
+
+// 同 mid 重复安排 = 覆盖（模型重复处理同一消息不重复提醒）；空 mid 不去重
+// （纯手动提醒可并存）。
+func TestReminderMidDedup(t *testing.T) {
+	s := openTestStore(t)
+	s.ReminderPut(Reminder{Mid: "m1", Title: "旧", Due: 100}, 50)
+	s.ReminderPut(Reminder{Mid: "m1", Title: "新", Due: 200}, 60)
+	if n := s.ReminderCount(); n != 1 {
+		t.Fatalf("count: %d, want 1 (同 mid 覆盖)", n)
+	}
+	got, _ := s.ReminderTakeDue(300)
+	if len(got) != 1 || got[0].Title != "新" || got[0].Due != 200 {
+		t.Errorf("kept: %+v, want 新/200", got)
+	}
+
+	s.ReminderPut(Reminder{Title: "手动一", Due: 100}, 50)
+	s.ReminderPut(Reminder{Title: "手动二", Due: 200}, 60)
+	if n := s.ReminderCount(); n != 2 {
+		t.Errorf("空 mid 应并存: %d, want 2", n)
+	}
+}
+
 // Claim 原子取出并删除：第二次 claim 落空（双击/重复事件不双订）。
 func TestBookPendingClaim(t *testing.T) {
 	s := openTestStore(t)
