@@ -667,7 +667,8 @@ func TestRunRemind(t *testing.T) {
 	s := openTestStore(t)
 	s.MetaSetInt("heartbeat", 995)
 
-	r := Reminder{Mid: "om_r1", Title: "早会提醒", Message: "9:20 敬业 早会", Link: "lark://x", Due: 1500}
+	r := Reminder{Mid: "om_r1", Title: "早会提醒", Message: "9:20 敬业 早会", Link: "lark://x",
+		Cid: "oc_g", Fid: "ou_f", Ctype: "group", Sender: "马佳欣", Due: 1500}
 	if err := RunRemind(s, r, 1000); err != nil {
 		t.Fatal(err)
 	}

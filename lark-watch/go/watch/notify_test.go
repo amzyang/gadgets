@@ -531,10 +531,10 @@ func TestRunNotifyCommand(t *testing.T) {
 	out := filepath.Join(dir, "out")
 	t.Setenv("LW_TEST_OUT", out)
 	writeConfig(t, dir, "notify",
-		`printf '%s|%s|%s|%s' "$LW_TITLE" "$LW_MESSAGE" "$LW_SUMMARY" "$LW_LINK" > "$LW_TEST_OUT"`)
+		`printf '%s|%s|%s|%s|%s' "$LW_TITLE" "$LW_MESSAGE" "$LW_SUMMARY" "$LW_LINK" "$LW_ICON" > "$LW_TEST_OUT"`)
 
 	err := RunNotifyCommand(context.Background(), Paths{ConfigDir: dir},
-		"Meeting", "3 点的会开始了", "lark://applink.feishu.cn/client/chat/open?openChatId=oc_x")
+		"Meeting", "3 点的会开始了", "lark://applink.feishu.cn/client/chat/open?openChatId=oc_x", "https://cdn/a.png")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,11 +542,27 @@ func TestRunNotifyCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("notify output not written: %v", err)
 	}
-	want := "Meeting|3 点的会开始了|3 点的会开始了|lark://applink.feishu.cn/client/chat/open?openChatId=oc_x"
+	want := "Meeting|3 点的会开始了|3 点的会开始了|lark://applink.feishu.cn/client/chat/open?openChatId=oc_x|https://cdn/a.png"
 	if string(b) != want {
 		t.Errorf("got %q, want %q", b, want)
 	}
 	if rang.Load() != 1 {
 		t.Errorf("bell rang %d times, want 1", rang.Load())
+	}
+}
+
+// LW_ICON 经 notifyEnv 恒设：icon 为空时是空串而非缺省，脚本无需判存在性。
+func TestRunNotifyCommandEmptyIconStillSet(t *testing.T) {
+	stubBell(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	t.Setenv("LW_TEST_OUT", out)
+	writeConfig(t, dir, "notify", `printf '%s' "${LW_ICON-UNSET}" > "$LW_TEST_OUT"`)
+
+	if err := RunNotifyCommand(context.Background(), Paths{ConfigDir: dir}, "t", "m", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(out); err != nil || string(b) != "" {
+		t.Errorf("LW_ICON 应为已设空串: %q %v", b, err)
 	}
 }

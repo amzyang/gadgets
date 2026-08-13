@@ -189,6 +189,54 @@ func TestPendingCardMidMigration(t *testing.T) {
 	}
 }
 
+// v3 库（reminder 无身份列、user_version=3）补 cid/fid/ctype/sender 四列升 v4，
+// 存量行身份字段读出空串（到期弹默认图标）；二次打开走「版本已最新」快速路径。
+func TestReminderIdentityMigration(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "lark-watch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'text', extras TEXT NOT NULL DEFAULT '[]', card TEXT NOT NULL, card_mid TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL);
+		CREATE TABLE reminder (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, message TEXT NOT NULL, link TEXT NOT NULL, due INTEGER NOT NULL, created INTEGER NOT NULL);
+		INSERT INTO reminder(mid, title, message, link, due, created) VALUES('om_old', '早会提醒', '9:20 早会', 'lark://x', 1500, 1000)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// 首次打开跑迁移；到期时刻前的 TakeDue 纯读不消费，条目留给二次打开验证
+	// 快速路径下的完整读取。
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
+		t.Fatalf("user_version = %d (err=%v), want %d", v, err, len(migrations))
+	}
+	if got, err := s.ReminderTakeDue(1400); err != nil || got != nil {
+		t.Fatalf("take before due: %+v %v", got, err)
+	}
+	s.Close()
+
+	s, err = OpenStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	got, err := s.ReminderTakeDue(1500)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("take: %+v %v", got, err)
+	}
+	want := Reminder{Mid: "om_old", Title: "早会提醒", Message: "9:20 早会", Link: "lark://x", Due: 1500}
+	if got[0] != want {
+		t.Errorf("migrated row: %+v, want 身份字段空串", got[0])
+	}
+}
+
 // v0 旧库（pending 无 format/extras 列）打开时连跳两级补列并落 user_version，
 // 存量行按 text/单候选读出；二次打开走「版本已最新」快速路径。
 func TestPendingFormatMigration(t *testing.T) {
@@ -307,7 +355,7 @@ func TestMigrateNoDowngrade(t *testing.T) {
 // 全新库建表即最新结构，migrate 应直落 len(migrations) 而不执行迁移循环——
 // 追加伪 migration（非法 SQL）后全新 OpenStore 仍成功，即证循环未跑。
 func TestFreshStoreSkipsMigrations(t *testing.T) {
-	migrations = append(migrations, struct{ sql, col string }{`THIS IS NOT SQL`, "no_such_column"})
+	migrations = append(migrations, struct{ sql, table, col string }{`THIS IS NOT SQL`, "pending", "no_such_column"})
 	defer func() { migrations = migrations[:len(migrations)-1] }()
 
 	s := openTestStore(t)

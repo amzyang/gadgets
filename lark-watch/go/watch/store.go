@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS pending (mid TEXT PRIMARY KEY, draft TEXT NOT NULL, f
 CREATE TABLE IF NOT EXISTS book_pending (mid TEXT PRIMARY KEY, slots TEXT NOT NULL, title TEXT NOT NULL, participants TEXT NOT NULL, card TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS digest_buf (id INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notify_wait (mid TEXT PRIMARY KEY, cid TEXT NOT NULL, msg TEXT NOT NULL, due INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS reminder (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, message TEXT NOT NULL, link TEXT NOT NULL, due INTEGER NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS reminder (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, message TEXT NOT NULL, link TEXT NOT NULL, due INTEGER NOT NULL, created INTEGER NOT NULL, cid TEXT NOT NULL DEFAULT '', fid TEXT NOT NULL DEFAULT '', ctype TEXT NOT NULL DEFAULT '', sender TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS catchup_last (cid TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS restricted (cid TEXT PRIMARY KEY, name TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS chat_state (cid TEXT PRIMARY KEY, self_last TEXT NOT NULL);
@@ -71,19 +71,27 @@ func OpenStore(stateDir string) (*Store, error) {
 // migrations 按序演进已有表结构：migrations[i] 把 PRAGMA user_version 从 i 升到
 // i+1，由 migrate 保证只执行一次。加列时在此追加一条 ALTER，并同步 schema 常量
 // （全新库建表即最新结构，由 OpenStore 的 fresh 探测直落最新版本号，不经此循环）。
-// col 是该迁移给 pending 新增的列名，作为「已完成」的结构探针供版本校准使用。
+// table/col 是该迁移新增列的归属表与列名，作为「已完成」的结构探针（migrate
+// 执行前逐条探测，列已存在即跳过该条）。
 var migrations = []struct {
-	sql string
-	col string
+	sql   string
+	table string
+	col   string
 }{
 	// v1: pending.format。曾以 try-ALTER 方式发布（未写版本号），存量库可能已有
 	// 该列，靠版本校准跳过。
-	{`ALTER TABLE pending ADD COLUMN format TEXT NOT NULL DEFAULT 'text'`, "format"},
+	{`ALTER TABLE pending ADD COLUMN format TEXT NOT NULL DEFAULT 'text'`, "pending", "format"},
 	// v2: 多候选草稿。draft 保留候选 0 原文（版本偏斜期旧二进制读到的仍是合法
 	// 草稿），extras 存候选 1..n-1 的 JSON 数组。
-	{`ALTER TABLE pending ADD COLUMN extras TEXT NOT NULL DEFAULT '[]'`, "extras"},
+	{`ALTER TABLE pending ADD COLUMN extras TEXT NOT NULL DEFAULT '[]'`, "pending", "extras"},
 	// v3: 卡片自身 message_id（发卡后回填），alerter 路径改卡完成态的凭证。
-	{`ALTER TABLE pending ADD COLUMN card_mid TEXT NOT NULL DEFAULT ''`, "card_mid"},
+	{`ALTER TABLE pending ADD COLUMN card_mid TEXT NOT NULL DEFAULT ''`, "pending", "card_mid"},
+	// v4: 提醒身份四元组（到期解析头像；旧行/人工提醒空串 = 默认图标）。四列
+	// 一个版本：ALTER 组在迁移事务内原子加齐，探针取首列即可代表整版。
+	{`ALTER TABLE reminder ADD COLUMN cid TEXT NOT NULL DEFAULT '';
+	ALTER TABLE reminder ADD COLUMN fid TEXT NOT NULL DEFAULT '';
+	ALTER TABLE reminder ADD COLUMN ctype TEXT NOT NULL DEFAULT '';
+	ALTER TABLE reminder ADD COLUMN sender TEXT NOT NULL DEFAULT ''`, "reminder", "cid"},
 }
 
 // migrate 把落后的库补到最新版本；fresh（本次全新建库）只落版本号不跑迁移。
@@ -116,26 +124,24 @@ func migrate(db *sql.DB, fresh bool) error {
 	}
 	if fresh {
 		v = len(migrations) // 建表即最新结构，无迁移可跑
-	} else {
-		// 版本校准：按实际列结构定位版本下界——覆盖 v1 try-ALTER 发布期（未写
-		// 版本号），以及无 >= 守卫的历史二进制打开新库时把版本号回写降级的情形；
-		// 列已存在即视为对应迁移已完成，避免重跑 ALTER 报 duplicate column。
-		for i, m := range migrations {
-			if v > i {
-				continue
-			}
-			var n int
-			if err := conn.QueryRowContext(ctx,
-				`SELECT count(*) FROM pragma_table_info('pending') WHERE name = ?`, m.col).Scan(&n); err != nil {
-				return err
-			}
-			if n > 0 {
-				v = i + 1
-			}
-		}
 	}
+	// 逐条补落后的迁移，执行前按列结构探针跳过已完成的——列已存在即视为该条
+	// 迁移已完成，避免重跑 ALTER 报 duplicate column 永久打不开库。覆盖三种来源：
+	// v1 try-ALTER 发布期（未写版本号）、无 >= 守卫的历史二进制把版本号回写降级、
+	// 建表晚于早期迁移的新表（旧库打开时由 schema 常量现建，生而最新结构）。
+	// 探针必须逐条而非「最高存在列定版本下界」：跨表后列存在性不再单调——新表
+	// 生而带末版列，不能证明前面别的表的迁移跑过。
 	for ; v < len(migrations); v++ {
-		if _, err := conn.ExecContext(ctx, migrations[v].sql); err != nil {
+		m := migrations[v]
+		var n int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, m.table, m.col).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, m.sql); err != nil {
 			return fmt.Errorf("migration %d: %w", v+1, err)
 		}
 	}
@@ -662,7 +668,10 @@ func scanMessages(rows *sql.Rows, err error) ([]Message, error) {
 // clampStaleGap 无条件丢弃（延迟窗口秒级），提醒的时间跨度是小时级，语义不同。
 type Reminder struct {
 	Mid, Title, Message, Link string
-	Due                       int64
+	// 身份四元组供到期解析头像（对应事件 JSON 的 cid/fid/ctype/from；Sender 即
+	// from，列名避 SQL 关键字）。全部可空：人工/无来源提醒到期弹默认图标。
+	Cid, Fid, Ctype, Sender string
+	Due                     int64
 }
 
 // ReminderPut 落盘一条提醒；mid 非空时先删同 mid 旧条目（同一事务，语义 = 覆盖）。
@@ -678,8 +687,8 @@ func (s *Store) ReminderPut(r Reminder, now int64) error {
 		}
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO reminder(mid, title, message, link, due, created) VALUES(?, ?, ?, ?, ?, ?)`,
-		r.Mid, r.Title, r.Message, r.Link, r.Due, now); err != nil {
+		`INSERT INTO reminder(mid, title, message, link, due, created, cid, fid, ctype, sender) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Mid, r.Title, r.Message, r.Link, r.Due, now, r.Cid, r.Fid, r.Ctype, r.Sender); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -694,7 +703,7 @@ func (s *Store) ReminderTakeDue(now int64) ([]Reminder, error) {
 	}
 	defer tx.Rollback()
 	out, err := scanReminders(tx.Query(
-		`SELECT mid, title, message, link, due FROM reminder WHERE due <= ? ORDER BY due, id`, now))
+		`SELECT mid, title, message, link, due, cid, fid, ctype, sender FROM reminder WHERE due <= ? ORDER BY due, id`, now))
 	if err != nil {
 		return nil, err
 	}
@@ -723,7 +732,7 @@ func scanReminders(rows *sql.Rows, err error) ([]Reminder, error) {
 	var out []Reminder
 	for rows.Next() {
 		var r Reminder
-		if err := rows.Scan(&r.Mid, &r.Title, &r.Message, &r.Link, &r.Due); err != nil {
+		if err := rows.Scan(&r.Mid, &r.Title, &r.Message, &r.Link, &r.Due, &r.Cid, &r.Fid, &r.Ctype, &r.Sender); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

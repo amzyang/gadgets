@@ -289,17 +289,16 @@ func StartNotify(ctx context.Context, configDir, script string, batch []Message,
 }
 
 // batchNotifyEnv 是批次通知的完整 LW_* 环境：标题（多条带条数）、每条一行的
-// 聚合摘要、首条的链接与扩展字段、头像 URL（LW_ICON，可为空）。
+// 聚合摘要、首条的链接与图标（见 notifyEnv）、首条的扩展字段。
 func batchNotifyEnv(titleBase string, batch []Message, icon string) []string {
 	first := batch[0]
-	return append(notifyEnv(batchTitle(titleBase, len(batch)), batchSummary(batch), first.Link),
+	return append(notifyEnv(batchTitle(titleBase, len(batch)), batchSummary(batch), first.Link, icon),
 		"LW_COUNT="+strconv.Itoa(len(batch)),
 		"LW_FROM="+deref(first.From),
 		"LW_CHAT="+deref(first.Chat),
 		"LW_CTYPE="+first.Ctype,
 		"LW_TYPE="+first.Type,
 		"LW_TEXT="+first.Text,
-		"LW_ICON="+icon,
 	)
 }
 
@@ -324,13 +323,15 @@ func batchSummary(batch []Message) string {
 	return strings.Join(lines, "\n")
 }
 
-// notifyEnv 是 LW_* 基础环境变量（标题/内容/摘要/链接）；批次调用再追加扩展字段。
-func notifyEnv(title, message, link string) []string {
+// notifyEnv 是 LW_* 基础环境变量（标题/内容/摘要/链接/图标）；批次调用再追加
+// 扩展字段。LW_ICON 恒设、可为空（头像 URL，空 = 默认图标），脚本无需判存在性。
+func notifyEnv(title, message, link, icon string) []string {
 	return []string{
 		"LW_TITLE=" + title,
 		"LW_MESSAGE=" + message,
 		"LW_SUMMARY=" + message,
 		"LW_LINK=" + link,
+		"LW_ICON=" + icon,
 	}
 }
 
@@ -340,14 +341,15 @@ func notifyEnv(title, message, link string) []string {
 var remindNotifyFn = RunNotifyCommand
 
 // RunNotifyCommand 是 notify 子命令入口：响铃后发送一条系统通知。
-// 优先执行用户 notify 自定义脚本（LW_SUMMARY 与批次模板兼容，取 message）；
-// 无脚本时走内置横幅——子命令是显式触发，off 总开关只管自动通知，不拦这里。
-func RunNotifyCommand(ctx context.Context, paths Paths, title, message, link string) error {
+// 优先执行用户 notify 自定义脚本（LW_SUMMARY 与批次模板兼容，取 message；
+// LW_ICON 经 notifyEnv 恒设、可为空）；无脚本时走内置横幅——子命令是显式
+// 触发，off 总开关只管自动通知，不拦这里。icon 为空 = 默认图标。
+func RunNotifyCommand(ctx context.Context, paths Paths, title, message, link, icon string) error {
 	bellFn(ctx)
 	if script, _ := LoadNotifyScript(paths.ConfigDir); script != "" {
-		return runNotifyScript(ctx, script, notifyEnv(title, message, link)...)
+		return runNotifyScript(ctx, script, notifyEnv(title, message, link, icon)...)
 	}
-	return builtinNotify(ctx, paths.ConfigDir, title, message, link, "", "")
+	return builtinNotify(ctx, paths.ConfigDir, title, message, link, "", icon)
 }
 
 // runNotifyScript 经 sh -c 执行脚本，消息字段由 LW_* 环境变量注入

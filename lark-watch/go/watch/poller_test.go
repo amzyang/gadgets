@@ -99,8 +99,8 @@ func TestFlushDueRemindersFires(t *testing.T) {
 	logs := captureEvlog(t)
 	var calls []string
 	old := remindNotifyFn
-	remindNotifyFn = func(_ context.Context, _ Paths, title, message, link string) error {
-		calls = append(calls, title+"|"+message+"|"+link)
+	remindNotifyFn = func(_ context.Context, _ Paths, title, message, link, icon string) error {
+		calls = append(calls, title+"|"+message+"|"+link+"|"+icon)
 		return nil
 	}
 	t.Cleanup(func() { remindNotifyFn = old })
@@ -110,7 +110,7 @@ func TestFlushDueRemindersFires(t *testing.T) {
 	p.flushDueReminders(context.Background(), 1000)
 	p.notifyWG.Wait()
 
-	if len(calls) != 1 || calls[0] != "早会提醒|9:20 早会|lark://x" {
+	if len(calls) != 1 || calls[0] != "早会提醒|9:20 早会|lark://x|" {
 		t.Errorf("notify calls: %v", calls)
 	}
 	if len(*events) != 1 || !strings.Contains(string((*events)[0]), `"p":"reminder"`) ||
@@ -129,7 +129,7 @@ func TestFlushDueRemindersFires(t *testing.T) {
 func TestFlushDueRemindersSkipsFuture(t *testing.T) {
 	old := remindNotifyFn
 	called := false
-	remindNotifyFn = func(context.Context, Paths, string, string, string) error { called = true; return nil }
+	remindNotifyFn = func(context.Context, Paths, string, string, string, string) error { called = true; return nil }
 	t.Cleanup(func() { remindNotifyFn = old })
 	p, events := newTestPoller(t, &listFake{}, 1000)
 	p.Store.ReminderPut(Reminder{Title: "未来", Due: 2000}, 900)
@@ -149,7 +149,7 @@ func TestFlushDueRemindersDropsStale(t *testing.T) {
 	logs := captureEvlog(t)
 	old := remindNotifyFn
 	called := false
-	remindNotifyFn = func(context.Context, Paths, string, string, string) error { called = true; return nil }
+	remindNotifyFn = func(context.Context, Paths, string, string, string, string) error { called = true; return nil }
 	t.Cleanup(func() { remindNotifyFn = old })
 	p, events := newTestPoller(t, &listFake{}, 5000)
 	p.Store.ReminderPut(Reminder{Mid: "om_s", Title: "旧提醒", Due: 1000}, 900)
@@ -165,6 +165,60 @@ func TestFlushDueRemindersDropsStale(t *testing.T) {
 	}
 	if drop := findLogs(logs(), "reminder.drop"); len(drop) != 1 || drop[0]["mid"] != "om_s" {
 		t.Errorf("reminder.drop: %v", drop)
+	}
+}
+
+// 提醒头像：到期时按落盘的身份四元组在通知 goroutine 内解析（p2p 对方头像 /
+// group 群头像），经 remindNotifyFn 抵达横幅并落 SQLite 缓存；无身份（人工
+// 提醒）零 CLI 调用、空 icon = 默认图标。
+func TestFlushDueRemindersResolvesAvatar(t *testing.T) {
+	cases := []struct {
+		name     string
+		r        Reminder
+		f        *listFake
+		wantIcon string
+		wantCall string // 空 = 不得有任何 CLI 调用
+		cacheKey string
+	}{
+		{"p2p 走对方头像", Reminder{Title: "t", Message: "m", Due: 900, Ctype: "p2p", Fid: "ou_peer", Sender: "李四"},
+			&listFake{fakeCLI: fakeCLI{userAvatarURL: "https://cdn/u.png"}},
+			"https://cdn/u.png", "user-avatar ou_peer 李四", "ou_peer"},
+		{"group 走群头像", Reminder{Title: "t", Message: "m", Due: 900, Ctype: "group", Cid: "oc_g", Fid: "ou_x", Sender: "李四"},
+			&listFake{fakeCLI: fakeCLI{chatAvatarURL: "https://cdn/c.png"}},
+			"https://cdn/c.png", "chat-avatar oc_g", "oc_g"},
+		{"无身份默认图标", Reminder{Title: "t", Message: "m", Due: 900}, &listFake{}, "", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var gotIcon string
+			old := remindNotifyFn
+			remindNotifyFn = func(_ context.Context, _ Paths, _, _, _, icon string) error {
+				gotIcon = icon
+				return nil
+			}
+			t.Cleanup(func() { remindNotifyFn = old })
+			p, _ := newTestPoller(t, c.f, 1000)
+			p.Store.ReminderPut(c.r, 800)
+
+			p.flushDueReminders(context.Background(), 1000)
+			p.notifyWG.Wait()
+
+			if gotIcon != c.wantIcon {
+				t.Errorf("icon: %q, want %q", gotIcon, c.wantIcon)
+			}
+			if c.wantCall == "" {
+				if len(c.f.calls) != 0 {
+					t.Errorf("无身份不应触 CLI: %v", c.f.calls)
+				}
+				return
+			}
+			if !c.f.hasCall(c.wantCall) {
+				t.Errorf("缺 CLI 调用 %q: %v", c.wantCall, c.f.calls)
+			}
+			if url, _, ok := p.Store.AvatarGet(c.cacheKey); !ok || url != c.wantIcon {
+				t.Errorf("avatar 应落缓存: %q %v", url, ok)
+			}
+		})
 	}
 }
 

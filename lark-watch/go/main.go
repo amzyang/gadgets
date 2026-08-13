@@ -337,9 +337,9 @@ func newReactCmd(cli *watch.ExecLarkCLI) *cobra.Command {
 }
 
 func newNotifyCmd() *cobra.Command {
-	var title, message, link, at, in, mid string
+	var title, message, link, at, in, mid, cid, fid, ctype, from string
 	cmd := &cobra.Command{
-		Use:                   "notify --message <text> [--title <t>] [--link <lark://…>] [--at '[MM-DD ]HH:MM' | --in <时长>] [--mid <mid>]",
+		Use:                   "notify --message <text> [--title <t>] [--link <lark://…>] [--at '[MM-DD ]HH:MM' | --in <时长>] [--mid <mid>] [--cid <cid> --ctype <p2p|group> --fid <fid> --from <名>]",
 		Short:                 "发送系统通知；--at/--in 定时（落盘延时提醒，由 run daemon 到期弹出）",
 		Args:                  cobra.NoArgs,
 		DisableFlagsInUseLine: true,
@@ -353,14 +353,16 @@ func newNotifyCmd() *cobra.Command {
 				return err
 			}
 			if due == 0 {
-				// --mid 只对定时提醒有意义：立即通知带它多半是想定时却漏了 --at/--in
-				if mid != "" {
+				// --mid 与身份四元组只对定时提醒有意义：立即通知带它们多半是
+				// 想定时却漏了 --at/--in
+				if mid != "" || cid != "" || fid != "" || ctype != "" || from != "" {
 					return usageErr(cmd)
 				}
-				return watch.RunNotifyCommand(daemonCtx(), watch.DefaultPaths(), title, message, link)
+				return watch.RunNotifyCommand(daemonCtx(), watch.DefaultPaths(), title, message, link, "")
 			}
 			return withStore(func(s *watch.Store) error {
-				r := watch.Reminder{Mid: mid, Title: title, Message: message, Link: link, Due: due}
+				r := watch.Reminder{Mid: mid, Title: title, Message: message, Link: link,
+					Cid: cid, Fid: fid, Ctype: ctype, Sender: from, Due: due}
 				return watch.RunRemind(s, r, now.Unix())
 			})
 		},
@@ -371,6 +373,10 @@ func newNotifyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&at, "at", "", "定时：'[MM-DD ]HH:MM'（本地时区，缺日期=今天，须为未来时刻）")
 	cmd.Flags().StringVar(&in, "in", "", "延时：'90m'/'2h'/纯秒（与 --at 互斥）")
 	cmd.Flags().StringVar(&mid, "mid", "", "去重键：同 mid 重复安排覆盖旧提醒（仅配合 --at/--in）")
+	cmd.Flags().StringVar(&cid, "cid", "", "来源会话 chat_id：到期横幅显示群头像（仅配合 --at/--in）")
+	cmd.Flags().StringVar(&ctype, "ctype", "", "来源会话类型 p2p|group（仅配合 --at/--in）")
+	cmd.Flags().StringVar(&fid, "fid", "", "发送者 open_id：p2p 到期横幅显示对方头像（仅配合 --at/--in）")
+	cmd.Flags().StringVar(&from, "from", "", "发送者姓名（p2p 头像搜索用；仅配合 --at/--in）")
 	return cmd
 }
 

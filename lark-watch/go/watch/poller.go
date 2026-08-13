@@ -557,7 +557,10 @@ func (p *Poller) flushDueReminders(ctx context.Context, now int64) {
 		evlog.Info("reminder.fire", "mid", r.Mid, "due", r.Due, "late", now-r.Due)
 		p.emit(ReminderEvent{P: "reminder", Title: r.Title, Msg: r.Message, Mid: r.Mid, Due: FmtMinute(r.Due)})
 		p.goNotify(func() {
-			if err := remindNotifyFn(ctx, p.Paths, r.Title, r.Message, r.Link); err != nil && ctx.Err() == nil {
+			// 身份四元组合成最小 Message 复用批次头像链路（无身份 = 空 icon =
+			// 默认图标，resolver 对空 key 零 CLI 调用）。
+			icon := p.resolveIcon([]Message{{Cid: r.Cid, Fid: r.Fid, Ctype: r.Ctype, From: &r.Sender}})
+			if err := remindNotifyFn(ctx, p.Paths, r.Title, r.Message, r.Link, icon); err != nil && ctx.Err() == nil {
 				logf("reminder notify failed: %v", err)
 				evlog.Error("notify.fail", "kind", "reminder", "mid", r.Mid, "err", err.Error())
 			}

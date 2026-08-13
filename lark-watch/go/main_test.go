@@ -33,6 +33,8 @@ func TestMissingRequiredFlags(t *testing.T) {
 		{"react 无 mid", []string{"react"}},
 		{"notify 无 message", []string{"notify"}},
 		{"notify 只给 mid 不定时", []string{"notify", "--mid", "m", "--message", "x"}},
+		{"notify 只给 cid 不定时", []string{"notify", "--message", "x", "--cid", "oc_x"}},
+		{"notify 只给 from 不定时", []string{"notify", "--message", "x", "--from", "李四"}},
 		{"mark 无参", []string{"mark"}},
 		{"ignore-add 无参", []string{"ignore-add"}},
 		{"ignore-add 空正则", []string{"ignore-add", ""}},
