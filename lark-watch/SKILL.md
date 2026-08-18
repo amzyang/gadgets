@@ -36,11 +36,12 @@ auth 自检已内置：二进制启动即校验（lark-cli 是否可用、user �
    可选 flag：`--interval 5`（轮询秒数）、`--digest-window 600`、`--digest-max 20`。
    **不要传 `timeout_ms`**：超时到点会静默杀死监控进程（曾发生：1h 超时把整个
    监控带走且无人发现）。Monitor 参数就按模板三项，不增不减。
-2. 挂兜底心跳（三个参数缺一不可，缺 `prompt` 会直接报错）：
+2. 挂兜底心跳（四个参数缺一不可，缺 `prompt` 或 `noop` 会直接报错）：
 
    ```
    ScheduleWakeup({
      delaySeconds: 1800,
+     noop: false,
      prompt: "lark-watch 兜底心跳：跑 {SKILL_DIR}/bin/lark-watch status 健康检查，全部正常则 noop 并以相同 prompt 重挂 1800s；检查项与异常处理见 {SKILL_DIR}/SKILL.md「心跳唤醒」一节",
      reason: "lark-watch 兜底心跳"
    })
@@ -399,8 +400,10 @@ mid/msg_type/key，获取方式同「事件处理」第 2 步与
 
 ### 心跳唤醒（ScheduleWakeup 触发）
 
-第一步永远是**重挂心跳**：以相同 prompt 再 ScheduleWakeup 1800s（三参数同首挂，
-见「启动」第 2 步）。先挂再检查——noop 分支忘记重挂会让心跳链就此断掉（曾发生）。
+第一步永远是**重挂心跳**：以相同 prompt 再 ScheduleWakeup 1800s（四参数同首挂，
+见「启动」第 2 步；`noop` 按本轮实情填——全部正常无事可报 `noop: true`，
+有异常或有实质产出 `noop: false`）。先挂再检查——noop 分支忘记重挂会让心跳链
+就此断掉（曾发生）。
 然后跑 `{SKILL_DIR}/bin/lark-watch status` 健康检查：`heartbeat_age_secs` <
 3×interval（默认 15）、`consumer_state == "alive"`、守护进程还活着
 （`pgrep -f 'bin/lark-watch run'`；TaskList 列的是 to-do 任务、查不到 Monitor，
